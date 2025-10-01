@@ -1,119 +1,74 @@
-// ocr.util.ts
-import { createWorker, PSM } from 'tesseract.js';
-import sharp from 'sharp'; // npm i sharp
+import axios, { AxiosError } from 'axios';
+import * as fs from 'fs';
+import FormData from 'form-data';
 
-interface OcrBBox {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-}
-interface OcrWord {
-  bbox?: OcrBBox;
-}
-interface OcrData {
-  text?: string;
-  words?: OcrWord[];
-  lines?: { bbox?: OcrBBox }[];
-  imageSize?: { width: number; height: number };
-}
-interface OcrResult {
-  data: OcrData;
-}
+const OCR_BASE_URL = process.env.OCR_BASE_URL || 'http://localhost:8000';
+const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 15000);
+const OCR_MAX_RETRIES = Number(process.env.OCR_MAX_RETRIES || 2);
 
-let workerPromise: Promise<Tesseract.Worker> | null = null;
-async function getWorker(): Promise<Tesseract.Worker> {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const worker = await createWorker('eng');
-      // Key params for natural images
-      await worker.setParameters({
-        // Sparse text anywhere on the image
-        tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-        // Boost spacing fidelity (helps “CAN'T” etc.)
-        preserve_interword_spaces: '1',
-        // Avoid tiny dpi that hurts accuracy
-        user_defined_dpi: '300',
-        // Whitelist loud, thumbnail-ish characters
-        tessedit_char_whitelist:
-          'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\'!?.:,@%()[]{}+-/" ',
-        // Don’t waste time generating HOCR/TSV unless you need it
-        tessjs_create_hocr: '0',
-        tessjs_create_tsv: '0',
+type PaddleWord = {
+  bbox: [number, number, number, number]; // [x0,y0,x1,y1]
+  text: string;
+  conf: number;
+};
+
+type PaddleResp = {
+  text: string;
+  charCount: number;
+  areaPct: number | null;
+  words: PaddleWord[];
+  imageSize: { width: number; height: number };
+};
+
+async function postWithRetry<T>(form: FormData, url: string): Promise<T> {
+  let attempt = 0;
+  let delay = 400;
+  for (;;) {
+    try {
+      const { data } = await axios.post<T>(url, form, {
+        headers: form.getHeaders(),
+        timeout: OCR_TIMEOUT_MS,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        validateStatus: (s) => s >= 200 && s < 500, // we’ll throw below on 4xx
       });
-      return worker;
-    })();
+      if ((data as any)?.detail)
+        throw new Error(JSON.stringify((data as any).detail));
+      return data;
+    } catch (e) {
+      const ax = e as AxiosError;
+      const isRetryable =
+        !ax.response ||
+        ax.code === 'ECONNABORTED' ||
+        (ax.response.status >= 500 && ax.response.status < 600);
+      if (isRetryable && attempt < OCR_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, 3000);
+        attempt++;
+        continue;
+      }
+      throw e;
+    }
   }
-  return workerPromise;
 }
 
-// Simple union-less sum of boxes area (fast & "good enough" for a % proxy)
-function boxesArea(words: OcrWord[]): number {
-  let sum = 0;
-  for (const w of words) {
-    const b = w.bbox;
-    if (!b) continue;
-    const wdt = Math.max(0, (b.x1 ?? 0) - (b.x0 ?? 0));
-    const hgt = Math.max(0, (b.y1 ?? 0) - (b.y0 ?? 0));
-    sum += wdt * hgt;
-  }
-  return sum;
-}
-
-// Basic image cleanup for thumbnails: upscale, grayscale, normalize, threshold
-async function preprocessForOcr(inputPath: string): Promise<Buffer> {
-  const img = sharp(inputPath);
-  const meta = await img.metadata();
-  const targetWidth =
-    meta.width && meta.width < 1600 ? 1600 : meta.width || 1600;
-
-  // Note: threshold value is heuristic; tweak 140–190 depending on your set.
-  return await img
-    .resize({ width: targetWidth }) // upsample small images
-    .grayscale()
-    .normalise() // increase contrast
-    .threshold(170) // binarize
-    .toBuffer();
-}
-
+/**
+ * Paddle-only OCR.
+ * Returns charCount, areaPct, and normalized text. No fallback.
+ */
 export async function ocrBasic(
   filePath: string,
-  // optionally pass native width/height if you already have them
-  nativeSize?: { width?: number; height?: number },
-): Promise<{ charCount: number; areaPct: number | null; rawText: string }> {
-  try {
-    const worker = await getWorker();
-    const pre = await preprocessForOcr(filePath);
+): Promise<{ charCount: number; areaPct: number | null; text?: string }> {
+  const form = new FormData();
+  form.append('file', fs.createReadStream(filePath));
 
-    const result: OcrResult = await worker.recognize(pre);
-    const data: OcrData = result.data || {};
-    const text = (data.text || '').replace(/\s+/g, ' ').trim();
+  const data = await postWithRetry<PaddleResp>(form, `${OCR_BASE_URL}/ocr`);
 
-    // --- areaPct ---
-    // Prefer Tesseract’s imageSize; fall back to nativeSize (from imageMeta)
-    const imgW = data.imageSize?.width || nativeSize?.width;
-    const imgH = data.imageSize?.height || nativeSize?.height;
-
-    let areaPct: number | null = null;
-    const words = Array.isArray(data.words) ? data.words : [];
-    if (imgW && imgH && imgW > 0 && imgH > 0 && words.length) {
-      const total = imgW * imgH;
-      const sum = boxesArea(words);
-      areaPct = Math.max(0, Math.min(1, sum / total));
-    }
-
-    console.log({
-      charCount: text.replace(/\s+/g, '').length,
-      areaPct: areaPct,
-      rawText: text,
-    });
-
-    return {
-      charCount: text.replace(/\s+/g, '').length,
-      areaPct,
-      rawText: text,
-    };
-  } catch (e) {
-    return { charCount: 0, areaPct: null, rawText: '' };
-  }
+  const text = (data.text || '').replace(/\s+/g, ' ').trim();
+  console.log('text', text);
+  return {
+    charCount: text.replace(/\s+/g, '').length,
+    areaPct: data.areaPct,
+    text,
+  };
 }

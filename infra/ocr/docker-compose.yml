@@ -1,0 +1,32 @@
+services:
+  paddleocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: paddleocr-api:latest
+    container_name: paddleocr-api
+    working_dir: /app
+    volumes:
+      # optional during dev; comment out if you want the baked-in file only
+      - ./server.py:/app/server.py:ro
+      - paddle_cache:/root/.paddleocr
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+      - '8000:8000'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000', timeout=5).status==200 else sys.exit(1)",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  paddle_cache:
