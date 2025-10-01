@@ -1,14 +1,13 @@
 services:
   paddleocr:
     build:
-      context: .
+      context: ./ocr
       dockerfile: Dockerfile
     image: paddleocr-api:latest
     container_name: paddleocr-api
     working_dir: /app
     volumes:
-      # optional during dev; comment out if you want the baked-in file only
-      - ./server.py:/app/server.py:ro
+      - ./ocr/server.py:/app/server.py:ro
       - paddle_cache:/root/.paddleocr
     environment:
       PYTHONUNBUFFERED: '1'
@@ -28,5 +27,21 @@ services:
       start_period: 90s
     restart: unless-stopped
 
+  vision:
+    build:
+      context: ./vision
+    image: ziporen-vision:latest
+    restart: unless-stopped
+    ports:
+      - '8081:8081'
+    environment:
+      OBJ_WEIGHTS: /app/models/yolov8n.pt
+      FACE_WEIGHTS: /app/models/yolov8n-face.pt
+      PYTHONUNBUFFERED: '1'
+
+    volumes:
+      - vision_models:/app/models
+
 volumes:
   paddle_cache:
+  vision_models:

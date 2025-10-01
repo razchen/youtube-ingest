@@ -13,6 +13,9 @@ import {
 import { sha256Buffer, pHash, assignSplit } from '../common/hash.util';
 import { isoDurationToSec } from '../common/time.util';
 import { ocrBasic } from '../common/ocr.util';
+import { analyzeImage } from '../common/vision.util';
+import { refineVision } from '../common/vision-post.util';
+
 import * as path from 'path';
 import * as fs from 'fs';
 import pLimit from 'p-limit';
@@ -99,6 +102,11 @@ export class YoutubeIngestService {
       'hash_sha256',
       'split',
       'fetchedAt',
+      'faces_count',
+      'faces_largest_areaPct',
+      'contrast',
+      'palette_top1',
+      'tags',
     ];
 
     const throttler = pLimit(6); // lightweight concurrency limit
@@ -155,7 +163,27 @@ export class YoutubeIngestService {
           chosen?.height ?? (await imageMeta(savePath)).height ?? null;
 
         const ocr = await ocrBasic(savePath);
+
         const title: string = snippet?.title ?? '';
+
+        const visionRaw = await analyzeImage(savePath, {
+          title,
+          ocrText: (ocr as any)?.rawText ?? '',
+        });
+
+        const refined = refineVision(visionRaw, {
+          title,
+          ocrText: (ocr as any)?.rawText ?? '',
+        });
+
+        console.log('refined', refined);
+
+        // --- map refined outputs ---
+        const faces_json = refined.faces_json; // already string or null
+        const objects_json = refined.objects_json; // already string
+        const palette_json = refined.palette_json; // already string
+        const contrast = refined.contrast ?? null;
+
         const publishedAt: string = snippet?.publishedAt ?? '';
         const views = Number(statistics?.viewCount ?? 0);
         const likes =
@@ -207,10 +235,10 @@ export class YoutubeIngestService {
           durationSec,
           isLive,
           madeForKids,
-          faces_json: null,
-          objects_json: null,
-          palette_json: null,
-          contrast: null,
+          faces_json,
+          objects_json,
+          palette_json,
+          contrast,
           entropy: null,
           saliency_json: null,
           flags_json: null,
@@ -244,6 +272,11 @@ export class YoutubeIngestService {
           row.hash_sha256,
           row.split,
           row.fetchedAt,
+          refined.csv.faces_count,
+          refined.csv.faces_largest_areaPct,
+          refined.contrast ?? null,
+          refined.csv.palette_top1,
+          refined.csv.tags,
         ]);
       }
     };
