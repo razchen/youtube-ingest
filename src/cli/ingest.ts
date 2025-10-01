@@ -4,6 +4,10 @@ import { AppModule } from '../app.module';
 import { YoutubeIngestService } from '../youtube-ingest/youtube-ingest.service';
 import minimist, { ParsedArgs } from 'minimist';
 
+// npm run ingest -- --channels UCX6OQ3DkcsbYNE6H8uQQuVA,UCcLYOTz3ct6_lk9iLToxxAw --after 2025-08-01 --max 10
+// npm run ingest -- --queries "cat videos, dog videos"
+// npm run ingest -- --max 10
+
 (async () => {
   const argv: ParsedArgs = minimist(process.argv.slice(2));
   const channelsArg = (argv.channels || argv.c || '') as string;

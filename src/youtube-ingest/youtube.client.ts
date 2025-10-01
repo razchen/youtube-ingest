@@ -5,9 +5,18 @@ import {
   YoutubeSnippet,
   YoutubeVideo,
 } from '@/types/youtube';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosInstance, AxiosResponse } from 'axios';
+
+function toRfc3339DateTime(s?: string): string | undefined {
+  if (!s) return undefined;
+  // If it's already a full RFC-3339, keep it
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(s)) return s;
+  // Accept plain YYYY-MM-DD and upgrade to start-of-day Zulu
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00:00Z`;
+  return s; // last resort; you could also throw
+}
 
 async function withBackoff<T>(fn: () => Promise<T>, maxRetries = 5) {
   let attempt = 0;
@@ -34,6 +43,7 @@ async function withBackoff<T>(fn: () => Promise<T>, maxRetries = 5) {
 export class YoutubeClient {
   private http: AxiosInstance;
   private key: string;
+  private logger = new Logger(YoutubeClient.name);
 
   constructor(cfg: ConfigService) {
     this.key = cfg.get<string>('YOUTUBE_API_KEY', '');
@@ -47,6 +57,7 @@ export class YoutubeClient {
     url: string,
     params: Record<string, any>,
   ): Promise<AxiosResponse<T>> {
+    this.logger.log(`GET ${url} ${JSON.stringify(params)} | key=${this.key}`);
     return withBackoff(() =>
       this.http.get<T>(url, { params: { key: this.key, ...params } }),
     );
@@ -55,6 +66,7 @@ export class YoutubeClient {
   async getChannel(
     channelId: string,
   ): Promise<YoutubeApiResponse<YoutubeChannel>> {
+    this.logger.log(`Fetching channel ${channelId}`);
     const res = await this.get<YoutubeApiResponse<YoutubeChannel>>(
       '/channels',
       {
@@ -71,17 +83,20 @@ export class YoutubeClient {
     publishedAfter?: string,
     pageToken?: string,
   ): Promise<YoutubeApiResponse<YoutubeSearchItem>> {
+    const params: Record<string, any> = {
+      part: 'snippet',
+      channelId,
+      type: 'video',
+      order: 'date',
+      maxResults: 50,
+    };
+    const pa = toRfc3339DateTime(publishedAfter);
+    if (pa) params.publishedAfter = pa;
+    if (pageToken) params.pageToken = pageToken;
+
     const res = await this.get<YoutubeApiResponse<YoutubeSearchItem>>(
       '/search',
-      {
-        part: 'snippet',
-        channelId,
-        type: 'video',
-        order: 'date',
-        publishedAfter,
-        maxResults: 50,
-        pageToken,
-      },
+      params,
     );
     return res.data;
   }
@@ -131,6 +146,7 @@ export class YoutubeClient {
     publishedAfter?: string,
     pageToken?: string,
   ): Promise<YoutubeApiResponse<YoutubeSearchItem>> {
+    const pa = toRfc3339DateTime(publishedAfter);
     const res = await this.get<YoutubeApiResponse<YoutubeSearchItem>>(
       '/search',
       {
@@ -138,7 +154,7 @@ export class YoutubeClient {
         part: 'snippet',
         type: 'video',
         order: 'date',
-        publishedAfter,
+        publishedAfter: pa,
         maxResults: 50,
         pageToken,
       },

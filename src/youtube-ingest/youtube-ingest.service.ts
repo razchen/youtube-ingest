@@ -260,6 +260,8 @@ export class YoutubeIngestService {
         const subscribers = Number(item?.statistics?.subscriberCount ?? 0);
         const channelTitle = item?.snippet?.title ?? '';
 
+        console.log('Fetching videos for', channelTitle);
+
         // Use search.list by channel
         let pageToken: string | undefined;
         let collectedVideoIds: string[] = [];
@@ -291,6 +293,8 @@ export class YoutubeIngestService {
         const chunkSize = 50;
         for (let i = 0; i < collectedVideoIds.length; i += chunkSize) {
           const chunk = collectedVideoIds.slice(i, i + chunkSize);
+
+          this.logger.log(`Processing chunk of ${chunk.length} videos`);
           await throttler(() =>
             processVideoIds(subscribers, channelTitle, channelId, chunk),
           );

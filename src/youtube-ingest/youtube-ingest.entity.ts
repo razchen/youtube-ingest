@@ -49,7 +49,7 @@ export class Thumbnail {
   engagementScore!: number | null;
 
   @Index({ unique: false })
-  @Column({ type: 'varchar', length: 32 })
+  @Column({ type: 'varchar', length: 128 })
   hash_pHash!: string;
 
   @Index({ unique: true })
