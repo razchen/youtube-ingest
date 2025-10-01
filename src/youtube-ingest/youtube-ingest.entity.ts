@@ -2,11 +2,11 @@ import { Column, Entity, PrimaryColumn, Index } from 'typeorm';
 
 @Entity({ name: 'thumbnails' })
 export class Thumbnail {
-  @PrimaryColumn({ type: 'text' })
+  @PrimaryColumn({ type: 'varchar', length: 32 })
   videoId!: string;
 
   @Index()
-  @Column({ type: 'text' })
+  @Column({ type: 'varchar', length: 64 })
   channelId!: string;
 
   @Column({ type: 'text' })
@@ -49,11 +49,11 @@ export class Thumbnail {
   engagementScore!: number | null;
 
   @Index({ unique: false })
-  @Column({ type: 'text' })
+  @Column({ type: 'varchar', length: 32 })
   hash_pHash!: string;
 
   @Index({ unique: true })
-  @Column({ type: 'text' })
+  @Column({ type: 'varchar', length: 64 })
   hash_sha256!: string;
 
   @Column({ type: 'enum', enum: ['train', 'val', 'test'] })

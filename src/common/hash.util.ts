@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import imghash from 'imghash';
 
 // sha256 buffer/string
-export async function sha256Buffer(buf: Buffer | string) {
+export function sha256Buffer(buf: Buffer | string) {
   const h = createHash('sha256');
   h.update(buf);
   return h.digest('hex');

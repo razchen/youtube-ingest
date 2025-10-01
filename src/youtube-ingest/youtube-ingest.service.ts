@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { YoutubeClient } from './youtube.client';
 import { Thumbnail } from './youtube-ingest.entity';
 import {
   ensureDir,
@@ -17,6 +16,8 @@ import { ocrBasic } from '../common/ocr.util';
 import * as path from 'path';
 import * as fs from 'fs';
 import pLimit from 'p-limit';
+import { YoutubeClient } from './youtube.client';
+import { IngestSummary } from '@/types/ingest';
 
 type IngestParams = {
   channelIds?: string[];
@@ -47,21 +48,27 @@ export class YoutubeIngestService {
     return path.resolve(this.dataDir, 'meta');
   }
 
-  async runIngest(params: IngestParams) {
-    const cfgChannels = (this.cfg.get('INGEST_CHANNEL_IDS', '') || '')
+  async runIngest(params: IngestParams): Promise<IngestSummary> {
+    const cfgChannels: string[] = (
+      this.cfg.get<string>('INGEST_CHANNEL_IDS', '') || ''
+    )
       .split(',')
-      .map((s) => s.trim())
+      .map((s: string) => s.trim())
       .filter(Boolean);
-    const channelIds = params.channelIds?.length
-      ? params.channelIds
-      : cfgChannels;
 
-    const publishedAfter =
+    const channelIds: string[] =
+      params.channelIds && params.channelIds.length > 0
+        ? params.channelIds
+        : cfgChannels;
+
+    const publishedAfter: string | undefined =
       params.publishedAfter ||
-      this.cfg.get('INGEST_PUBLISHED_AFTER') ||
+      this.cfg.get<string>('INGEST_PUBLISHED_AFTER') ||
       undefined;
-    const maxVideosPerChannel = params.maxVideosPerChannel ?? undefined;
-    const queries = params.queries ?? undefined;
+
+    const maxVideosPerChannel: number | undefined =
+      params.maxVideosPerChannel ?? undefined;
+    const queries: string[] | undefined = params.queries ?? undefined;
 
     const start = Date.now();
     let channelsProcessed = 0;
@@ -163,7 +170,6 @@ export class YoutubeIngestService {
               ? 0
               : null;
         const categoryId = snippet?.categoryId ?? null;
-        const channelCountry = snippet?.defaultAudioLanguage ? null : null; // placeholder for future
         const fetchedAt = new Date().toISOString();
 
         // engagementScore = log(views)/log(subscribers+1)
@@ -207,7 +213,6 @@ export class YoutubeIngestService {
           contrast: null,
           entropy: null,
           saliency_json: null,
-          channelCountry,
           flags_json: null,
           etag: v?.etag ?? null,
           notes: null,
