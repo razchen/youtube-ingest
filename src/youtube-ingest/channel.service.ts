@@ -3,6 +3,15 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Channel } from './channel.entity';
 import { YoutubeClient } from './youtube.client';
+import { YoutubeChannel } from '@/types/youtube';
+import * as path from 'path';
+import { promises as fs } from 'fs';
+
+type DiscoverRow = {
+  handle: string;
+  country?: string | null;
+  categories?: string[] | undefined;
+};
 
 export type DiscoverSummary = {
   handlesProcessed: number;
@@ -24,7 +33,8 @@ export class ChannelService {
   private readonly logger = new Logger(ChannelService.name);
 
   constructor(
-    @InjectRepository(Channel) private readonly repo: Repository<Channel>,
+    @InjectRepository(Channel)
+    private readonly channelRepo: Repository<Channel>,
     private readonly yt: YoutubeClient,
   ) {}
 
@@ -36,12 +46,23 @@ export class ChannelService {
   }
 
   /** Upsert a Channel row from a YouTube API channel payload */
-  private async upsertFromApi(item: any, handle?: string): Promise<Channel> {
+  private async upsertFromApi(
+    item: YoutubeChannel & {
+      country?: string | null;
+      categories?: string[] | undefined;
+    },
+    handle?: string,
+    overrides?: { country?: string | null; categories?: string[] | undefined },
+  ): Promise<Channel> {
     const id: string = item?.id;
     const sn = item?.snippet ?? {};
     const st = item?.statistics ?? {};
     const cd = item?.contentDetails ?? {};
     const uploads = cd?.relatedPlaylists?.uploads ?? null;
+
+    // Prefer file-provided values over YouTube (YT often lacks these)
+    const countryFromFile = overrides?.country ?? null;
+    const categoriesFromFile = overrides?.categories ?? undefined;
 
     const entity: Partial<Channel> = {
       id,
@@ -52,17 +73,24 @@ export class ChannelService {
       viewsCount: st?.viewCount != null ? Number(st.viewCount) : null,
       videosCount: st?.videoCount != null ? Number(st.videoCount) : null,
       uploadsPlaylistId: uploads,
-      country: sn?.country ?? null,
-      topicCategories_json: (sn?.topicDetails?.topicCategories
-        ? JSON.stringify(sn.topicDetails.topicCategories)
-        : null) as any, // topicDetails may not exist depending on parts
+
+      // COUNTRY: prefer file; fallback to snippet.country; else null
+      country: countryFromFile ?? null,
+
+      /**
+       * CATEGORIES: if provided from file, use them (canonical).
+       * If you want to keep YT topicDetails as a fallback, you can do:
+       *    const ytTopics = item?.topicDetails?.topicCategories ?? null;
+       * but many API calls won’t include topicDetails unless requested in parts and may still be empty.
+       */
+      topicCategories_json: categoriesFromFile
+        ? JSON.stringify(categoriesFromFile)
+        : null,
+
       etag: item?.etag ?? null,
-      // do not touch lastIngestAt / lastVideoPublishedAt here
-      // scrapeStatus left as-is or defaults when first insert
     };
 
-    // upsert by primary key (id)
-    await this.repo
+    await this.channelRepo
       .createQueryBuilder()
       .insert()
       .into(Channel)
@@ -83,7 +111,7 @@ export class ChannelService {
       )
       .execute();
 
-    return this.repo.findOneByOrFail({ id });
+    return this.channelRepo.findOneByOrFail({ id });
   }
 
   /** Flow A: discovery from handles (no videos touched) */
@@ -127,7 +155,7 @@ export class ChannelService {
   async listForIngest(opts: ListForIngestOptions = {}): Promise<Channel[]> {
     const { limit, statuses, channelIds } = opts;
 
-    const qb = this.repo
+    const qb = this.channelRepo
       .createQueryBuilder('c')
       .orderBy('c.lastIngestAt', 'ASC')
       .addOrderBy('c.id', 'ASC');
@@ -149,7 +177,7 @@ export class ChannelService {
     status: Channel['scrapeStatus'],
     error?: string | null,
   ) {
-    await this.repo.update(
+    await this.channelRepo.update(
       { id },
       { scrapeStatus: status, scrapeError: error ?? null },
     );
@@ -159,6 +187,107 @@ export class ChannelService {
     id: string,
     markers: Partial<Pick<Channel, 'lastIngestAt' | 'lastVideoPublishedAt'>>,
   ) {
-    await this.repo.update({ id }, markers);
+    await this.channelRepo.update({ id }, markers);
+  }
+
+  async discoverFromJson(filePath: string): Promise<DiscoverSummary> {
+    const abs = path.isAbsolute(filePath)
+      ? filePath
+      : path.join(process.cwd(), filePath);
+    const raw = await fs.readFile(abs, 'utf8');
+
+    let rows: DiscoverRow[] = [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        throw new Error('JSON root must be an array');
+      }
+      rows = parsed.map((r) => ({
+        handle: String(r.handle ?? '').trim(),
+        country: (r.country ?? null) ? String(r.country).trim() : null,
+        categories: Array.isArray(r.categories)
+          ? r.categories.map((x) => String(x).trim()).filter(Boolean)
+          : undefined,
+      }));
+    } catch (e: any) {
+      throw new Error(`Invalid JSON at ${abs}: ${e?.message ?? e}`);
+    }
+
+    // Normalize + merge duplicates across file
+    const merged = this.mergeDiscoverRows(rows);
+
+    const notFound: string[] = [];
+    const errors: { handle: string; error: string }[] = [];
+    const mappings: { handle: string; channelId: string }[] = [];
+    let upserts = 0;
+
+    for (const { handle, country, categories } of merged) {
+      const h = this.normHandle(handle);
+      if (!h) continue;
+
+      this.logger.log(h);
+
+      try {
+        const item = await this.yt.getChannelByHandle(h);
+        if (!item?.id) {
+          notFound.push(h);
+          continue;
+        }
+
+        // IMPORTANT: pass overrides so we don't depend on YouTube for country/categories
+        await this.upsertFromApi(item, h, { country, categories });
+
+        mappings.push({ handle: h, channelId: item.id });
+        upserts++;
+      } catch (e: any) {
+        errors.push({ handle: h, error: String(e?.message ?? e) });
+        this.logger.warn(`discoverFromJson failed for ${h}: ${String(e)}`);
+      }
+    }
+
+    return {
+      handlesProcessed: merged.length,
+      resolved: mappings.length,
+      notFound,
+      upserts,
+      errors,
+      mappings,
+    };
+  }
+
+  /**
+   * Merge duplicates from the input file:
+   * - Keep one entry per handle
+   * - Prefer the last non-empty country (or first; choose your policy)
+   * - Union/deduplicate categories
+   */
+  private mergeDiscoverRows(rows: DiscoverRow[]): DiscoverRow[] {
+    const byHandle = new Map<
+      string,
+      { country: string | null; categories: Set<string> }
+    >();
+
+    for (const r of rows) {
+      const h = (r.handle ?? '').trim();
+      if (!h) continue;
+
+      const prev = byHandle.get(h) ?? {
+        country: null,
+        categories: new Set<string>(),
+      };
+      const country = r.country && r.country.length ? r.country : prev.country;
+      const categories = prev.categories;
+      (r.categories ?? []).forEach((c) => categories.add(c));
+
+      byHandle.set(h, { country: country ?? null, categories });
+    }
+
+    return Array.from(byHandle.entries()).map(
+      ([handle, { country, categories }]) => ({
+        handle,
+        country,
+        categories: Array.from(categories.values()).sort(),
+      }),
+    );
   }
 }

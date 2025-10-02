@@ -12,7 +12,5 @@ export interface IngestSummary {
   imagesSaved: number;
   rowsUpserted: number;
   tookSec: number;
-  jsonlPath: string;
-  csvPath: string;
   imageDir: string;
 }

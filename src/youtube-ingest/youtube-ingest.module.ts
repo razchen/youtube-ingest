@@ -6,6 +6,7 @@ import { YoutubeIngestService } from './youtube-ingest.service';
 import { Thumbnail } from './thumbnail.entity';
 import { YoutubeClient } from './youtube.client';
 import { Channel } from './channel.entity';
+import { ChannelService } from './channel.service';
 
 @Module({
   imports: [
@@ -13,7 +14,7 @@ import { Channel } from './channel.entity';
     HttpModule,
     TypeOrmModule.forFeature([Thumbnail, Channel]),
   ],
-  providers: [YoutubeIngestService, YoutubeClient],
+  providers: [ChannelService, YoutubeIngestService, YoutubeClient],
   exports: [YoutubeIngestService],
 })
 export class YoutubeIngestModule {}

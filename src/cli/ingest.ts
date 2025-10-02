@@ -2,13 +2,8 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../app.module';
 import { YoutubeIngestService } from '../youtube-ingest/youtube-ingest.service';
+import { ChannelService } from '../youtube-ingest/channel.service';
 import minimist, { ParsedArgs } from 'minimist';
-
-// Examples:
-// npm run ingest -- --discover-only --handles @mrbeast,@veritasium
-// npm run ingest -- --from-db --statuses idle,queued --max 3
-// npm run ingest -- --channels @mrbeast,@mkbhd --max 100
-// npm run ingest -- --queries "cat videos,dog videos" --after 2025-08-01
 
 function splitIdsAndHandles(items: string[] | undefined) {
   if (!items?.length)
@@ -20,16 +15,19 @@ function splitIdsAndHandles(items: string[] | undefined) {
   for (const raw of items) {
     const s = raw.trim();
     if (!s) continue;
-
     handles.push(s);
   }
-  return {
-    handles: handles.length ? handles : undefined,
-  };
+  return { handles: handles.length ? handles : undefined };
 }
 
 (async () => {
   const argv: ParsedArgs = minimist(process.argv.slice(2));
+
+  // NEW: discover from JSON file
+  const discoverJson = (argv['discover-json'] ||
+    argv['json-file'] ||
+    argv.J) as string | undefined;
+
   const channelsArg = (argv.channels || argv.c || '') as string;
   const handlesArg = (argv.handles || argv.H || '') as string;
   const after = (argv.after || argv.a) as string | undefined;
@@ -55,27 +53,22 @@ function splitIdsAndHandles(items: string[] | undefined) {
     new Set([...(handlesFromChannels ?? []), ...(handlesList ?? [])]),
   );
 
-  // const queries = queriesArg ? toList(queriesArg) : undefined;
-
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['log', 'warn', 'error'],
   });
 
   try {
-    const svc = app.get(YoutubeIngestService);
+    const youtubeIngestService = app.get(YoutubeIngestService);
+    const channelService = app.get(ChannelService);
 
-    // 0) Legacy "queries" mode: preserve your old behavior by calling runIngest
-    // if (queries?.length) {
-    //   const summary = await svc.runIngest({
-    //     channelIds: inputIds.length ? inputIds : undefined,
-    //     channelHandles: inputHandles.length ? inputHandles : undefined,
-    //     queries,
-    //     publishedAfter: after,
-    //     maxVideosPerChannel: max,
-    //   });
-    //   console.log(JSON.stringify(summary, null, 2));
-    //   return;
-    // }
+    // 0) NEW: Discover channels from a JSON file with {handle,country?,categories?}
+    if (discoverJson) {
+      const summary = await channelService.discoverFromJson(discoverJson);
+      console.log(
+        JSON.stringify({ mode: 'discover-json', ...summary }, null, 2),
+      );
+      return;
+    }
 
     // 1) Discover only: resolve & upsert channels, then exit
     if (discoverOnly) {
@@ -83,19 +76,9 @@ function splitIdsAndHandles(items: string[] | undefined) {
         console.error('discover-only requires --handles');
         process.exit(2);
       }
-      const res = await svc.discoverChannelsFromHandles(inputHandles);
+      const summary = await channelService.discoverFromHandles(inputHandles);
       console.log(
-        JSON.stringify(
-          {
-            mode: 'discover-only',
-            resolved: res.resolvedIds.length,
-            notFound: res.notFound,
-            errors: res.errors,
-            channelIds: res.resolvedIds,
-          },
-          null,
-          2,
-        ),
+        JSON.stringify({ mode: 'discover-only', ...summary }, null, 2),
       );
       return;
     }
@@ -108,7 +91,7 @@ function splitIdsAndHandles(items: string[] | undefined) {
           ) as Array<'idle' | 'queued' | 'running' | 'done' | 'error'>)
         : undefined;
 
-      const summary = await svc.runIngestFromDb({
+      const summary = await youtubeIngestService.runIngestFromDb({
         statuses,
         limit,
         publishedAfter: after,
@@ -117,6 +100,17 @@ function splitIdsAndHandles(items: string[] | undefined) {
       console.log(JSON.stringify(summary, null, 2));
       return;
     }
+
+    // 3) No mode matched → show quick help
+    console.error(
+      [
+        'No mode selected. Examples:',
+        '  npm run ingest -- --discover-json ./data/parsed/handles_us_travel.json',
+        '  npm run ingest -- --discover-only --handles @mrbeast,@veritasium',
+        '  npm run ingest -- --from-db --statuses idle,queued --max 3',
+      ].join('\n'),
+    );
+    process.exit(2);
   } finally {
     await app.close();
   }
