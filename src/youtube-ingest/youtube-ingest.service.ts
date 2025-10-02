@@ -137,58 +137,6 @@ export class YoutubeIngestService {
     return { resolvedIds, notFound, errors };
   }
 
-  /** Build ingest payload from DB rows and run ingest (no YouTube channel fetch). */
-  // async ingestChannelsUsingDbRecords(input: {
-  //   channelIds: string[];
-  //   publishedAfter?: string;
-  //   maxVideosPerChannel?: number;
-  // }): Promise<IngestSummary> {
-  //   if (!input.channelIds.length) {
-  //     return {
-  //       channelsProcessed: 0,
-  //       videosSeen: 0,
-  //       imagesSaved: 0,
-  //       rowsUpserted: 0,
-  //       tookSec: 0,
-  //       jsonlPath: path.join(this.metaDir(), 'records.jsonl'),
-  //       csvPath: path.join(this.metaDir(), 'records.csv'),
-  //       imageDir: this.imageDir(),
-  //     };
-  //   }
-
-  //   const rows = await this.channelRepo
-  //     .createQueryBuilder('c')
-  //     .where('c.id IN (:...ids)', { ids: input.channelIds })
-  //     .getMany();
-
-  //   // Skip any ids not found in DB (no remote fetch)
-  //   const payload = rows.map((r) => ({
-  //     id: r.id,
-  //     title: r.title ?? '',
-  //     subscribers: Number(r.subscribers ?? 0),
-  //   }));
-
-  //   if (!payload.length) {
-  //     this.logger.warn('No matching channels in DB for provided ids.');
-  //     return {
-  //       channelsProcessed: 0,
-  //       videosSeen: 0,
-  //       imagesSaved: 0,
-  //       rowsUpserted: 0,
-  //       tookSec: 0,
-  //       jsonlPath: path.join(this.metaDir(), 'records.jsonl'),
-  //       csvPath: path.join(this.metaDir(), 'records.csv'),
-  //       imageDir: this.imageDir(),
-  //     };
-  //   }
-
-  //   return this.ingestChannelsByIds(
-  //     payload,
-  //     input.publishedAfter,
-  //     input.maxVideosPerChannel,
-  //   );
-  // }
-
   /** Ingest a selection from DB (by statuses/limit), honoring 90d default window, no retries. */
   async runIngestFromDb(input: {
     statuses?: Array<'idle' | 'queued' | 'running' | 'done' | 'error'>;
@@ -208,6 +156,7 @@ export class YoutubeIngestService {
     if (limit && limit > 0) qb.take(limit);
 
     const rows = await qb.getMany();
+    this.logger.log(`Found ${rows.length} channels for ingest`);
     const channels = rows.map((r) => ({
       id: r.id,
       title: r.title ?? '',
