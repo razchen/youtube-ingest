@@ -7,44 +7,43 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Channel } from './channel.entity';
 
-interface CSVThumbnail extends Thumbnail {
+type WithChannelExtras<T> = T & {
   channelTitle: string | null;
   subscribers: number | null;
-}
+};
 
-interface ThumbnailRecord {
-  videoId: string;
-  channelId: string;
+type RawExtras = {
   channelTitle: string | null;
-  title: string | null;
-  publishedAt: string | null;
-  views: number | null;
-  likes: number | null;
-  subscribers: number | null;
-  thumbnail_savedPath: string | null;
-  thumbnail_src: string | null;
-  thumbnail_nativeW: number | null;
-  thumbnail_nativeH: number | null;
-  ocr_charCount: number | null;
-  ocr_areaPct: number | null;
-  engagementScore: number | null;
-  hash_pHash: string | null;
-  hash_sha256: string | null;
-  split: string | null;
-  fetchedAt: string | null;
-  faces_count: number | null;
-  faces_largest_areaPct: number | null;
-  contrast: number | null;
-  palette_top1: string | null;
-  tags: string | null;
-}
+  subscribers: string | number | null; // MySQL can return strings for numbers
+};
+
+type FacesCSV = {
+  faces_count?: number | null;
+  faces_largest_areaPct?: number | null;
+};
+
+type PaletteCSV = {
+  palette_top1?: string | null;
+};
+
+type ObjectsCSV = {
+  tags?: string | null;
+};
+
+// Your Thumbnail likely has these as `any`; augment the local export shape:
+type CSVThumbnail = WithChannelExtras<Thumbnail> & {
+  faces_json?: { csv?: FacesCSV } | null;
+  palette_json?: { csv?: PaletteCSV } | null;
+  objects_json?: { csv?: ObjectsCSV } | null;
+};
 
 @Injectable()
 export class ExportService {
+  private readonly logger = new Logger(ExportService.name);
+
   constructor(
     @InjectRepository(Thumbnail)
     private readonly repo: Repository<Thumbnail>,
-    private readonly logger: Logger,
   ) {}
 
   private csvHeaders = [
@@ -75,15 +74,13 @@ export class ExportService {
   ];
 
   // map DB row -> CSV row
-  private toCsvRow(t: CSVThumbnail): any[] {
-    // If you stored these as JSON strings, keep as-is;
-    // if they’re JSON objects, adapt accordingly.
+  private toCsvRow(t: CSVThumbnail): Array<string | number | null> {
     const faces_count = t.faces_json?.csv?.faces_count ?? null;
     const faces_largest_areaPct =
-      (t as any)?.faces_json?.csv?.faces_largest_areaPct ?? null;
+      t.faces_json?.csv?.faces_largest_areaPct ?? null;
     const contrast = t.contrast ?? null;
-    const palette_top1 = (t as any)?.palette_json?.csv?.palette_top1 ?? null;
-    const tags = (t as any)?.objects_json?.csv?.tags ?? null;
+    const palette_top1 = t.palette_json?.csv?.palette_top1 ?? null;
+    const tags = t.objects_json?.csv?.tags ?? null;
 
     return [
       t.videoId,
@@ -191,46 +188,35 @@ export class ExportService {
 
     for (;;) {
       // Build a paged query with a stable sort (by videoId)
-      let qb = this.repo
+      const qb = this.repo
         .createQueryBuilder('t')
         .leftJoin(Channel, 'c', 'c.id = t.channelId')
-        .select([
-          't.*', // if using MySQL with TypeORM < 0.3, adapt to explicit columns
-        ])
+        .select('t') // get the full Thumbnail entity typed
         .addSelect('c.title', 'channelTitle')
         .addSelect('c.subscribers', 'subscribers')
         .orderBy('t.videoId', 'ASC')
         .take(batchSize);
 
-      if (lastId) qb = qb.where('t.videoId > :lastId', { lastId });
+      if (lastId) qb.where('t.videoId > :lastId', { lastId });
+      if (options?.channelIds?.length)
+        qb.andWhere('t.channelId IN (:...cids)', { cids: options.channelIds });
+      if (options?.publishedAfter)
+        qb.andWhere('t.publishedAt >= :pa', { pa: options.publishedAfter });
 
-      if (options?.channelIds?.length) {
-        qb = qb.andWhere('t.channelId IN (:...cids)', {
-          cids: options.channelIds,
-        });
-      }
-      if (options?.publishedAfter) {
-        qb = qb.andWhere('t.publishedAt >= :pa', {
-          pa: options.publishedAfter,
-        });
-      }
+      const { raw, entities } = await qb.getRawAndEntities();
+      if (!entities.length) break;
 
-      const raws = await qb.getMany();
+      const extras = raw as RawExtras[]; // single, centralized assertion
 
-      if (!raws.length) break;
+      const rows: CSVThumbnail[] = entities.map((e, i) => ({
+        ...e,
+        channelTitle: extras[i].channelTitle,
+        subscribers:
+          extras[i].subscribers != null ? Number(extras[i].subscribers) : null,
+      }));
 
-      // massage rows into our shapes
-      const rows: CSVThumbnail[] = raws.map((r: ThumbnailRecord) => {
-        // If using getRawMany: columns come as t_<col>, channelTitle, subscribers
-        // Adapt mapping as needed depending on your driver & TypeORM version.
-        const t: any = {};
-        t.videoId = r['videoId'] ?? null;
-        t.channelId = r['channelId'] ?? null;
-        t.channelTitle = r['channelTitle'] ?? null;
-        t.subscribers =
-          r['subscribers'] != null ? Number(r['subscribers']) : null;
-        return t as CSVThumbnail;
-      });
+      total += rows.length;
+      lastId = entities[entities.length - 1].videoId;
 
       // append to CSV + JSONL
       const csvLines = rows.map((t) =>
