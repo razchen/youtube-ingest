@@ -6,27 +6,26 @@ from ultralytics import YOLO
 
 app = Flask(__name__)
 
-# --- Object detector (COCO): YOLO12 ---
-# Ultralytics will auto-download yolo12n.pt on first use if not present.
-# (You can override with OBJ_WEIGHTS env.)
-OBJ_WEIGHTS = os.environ.get("OBJ_WEIGHTS", "yolo12n.pt")
-yolo_obj = YOLO(OBJ_WEIGHTS)  # e.g., "yolo12n.pt"
-app.logger.info(f"[vision] Object model: {OBJ_WEIGHTS}")
+# --- Object detector (COCO) ---
+OBJ_WEIGHTS = os.environ.get("OBJ_WEIGHTS", "yolov8n.pt")
+try:
+    yolo_obj = YOLO(OBJ_WEIGHTS)
+    app.logger.info(f"[vision] Object model: {OBJ_WEIGHTS}")
+except Exception as e:
+    app.logger.error(f"[vision] Failed to load {OBJ_WEIGHTS}: {e}. Falling back to yolov8n.pt")
+    yolo_obj = YOLO("yolov8n.pt")
 
-# --- Face detector (optional, bring your own weights) ---
-# Provide a local path via FACE_WEIGHTS (mounted file). Examples:
-#  - a YOLO-Face .pt you trust
-#  - a RetinaFace/YuNet ONNX handled by your own code (see optional fallback section)
-FACE_WEIGHTS = os.environ.get("FACE_WEIGHTS")  # e.g., "/app/models/yolov8n-face.pt"
+# --- Face detector ---
+FACE_WEIGHTS = os.environ.get("FACE_WEIGHTS", "/models/yolov8n-face.pt")
 yolo_face = None
-if FACE_WEIGHTS and os.path.exists(FACE_WEIGHTS):
-    try:
+try:
+    if os.path.exists(FACE_WEIGHTS):
         yolo_face = YOLO(FACE_WEIGHTS)
-        app.logger.info(f"[vision] Face model loaded: {FACE_WEIGHTS}")
-    except Exception as e:
-        app.logger.error(f"[vision] Failed to load face model {FACE_WEIGHTS}: {e}")
-else:
-    app.logger.warning("[vision] No FACE_WEIGHTS provided; face detection disabled.")
+        app.logger.info(f"[vision] Face model: {FACE_WEIGHTS}")
+    else:
+        app.logger.warning(f"[vision] Face weights not found at {FACE_WEIGHTS}; face detection disabled.")
+except Exception as e:
+    app.logger.warning(f"[vision] Failed to load face model '{FACE_WEIGHTS}': {e}. Face detection disabled.")
 
 def rms_contrast(img_gray: Image.Image) -> float:
     arr = np.asarray(img_gray, dtype=np.float32)
@@ -70,7 +69,8 @@ def analyze():
     contrast = rms_contrast(img.convert('L'))
 
     # objects (YOLO12 detect)
-    res = yolo_obj.predict(img, imgsz=640, conf=0.25, verbose=False)
+    res = yolo_face.predict(img, imgsz=1280, conf=0.15, iou=0.5, verbose=False)
+
     names, raw = [], []
     for r in res:
         for b in r.boxes:
@@ -81,20 +81,21 @@ def analyze():
             raw.append({"name": name, "conf": float(b.conf[0]),
                         "box": {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}})
     coarse = coco_to_coarse(names)
-
+    
     # faces (optional YOLO-Face)
-    faces_payload = {"count": 0}
+    faces_payload = {"enabled": yolo_face is not None, "count": 0}
     if yolo_face is not None:
-        fr = yolo_face.predict(img, imgsz=960, conf=0.15, verbose=False)  # better for small faces
+        fr = yolo_face.predict(img, imgsz=1280, conf=0.35, iou=0.5, verbose=False)
         faces = []
         for r in fr:
             for b in r.boxes:
                 x1, y1, x2, y2 = map(float, b.xyxy[0])
-                faces.append({"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1, "area": (x2 - x1) * (y2 - y1)})
+                area = (x2 - x1) * (y2 - y1)
+                faces.append({"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1, "area": area})
         if faces:
             largest = max(faces, key=lambda f: f["area"])
             largest["areaPct"] = largest["area"] / (w * h)
-            faces_payload = {"count": len(faces), "largest": largest, "boxes": faces}
+            faces_payload.update({"count": len(faces), "largest": largest, "boxes": faces})
 
     return jsonify({
         "faces": faces_payload,

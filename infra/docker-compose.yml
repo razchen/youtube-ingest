@@ -30,18 +30,34 @@ services:
   vision:
     build:
       context: ./vision
+      dockerfile: Dockerfile
     image: ziporen-vision:latest
-    restart: unless-stopped
+    container_name: vision-api
+    environment:
+      PYTHONUNBUFFERED: '1'
+      OBJ_WEIGHTS: yolov8n.pt
+      # Provide this only if you mounted a real file:
+      FACE_WEIGHTS: /models/yolov8n-face.pt
+    volumes:
+      # Mount your face model if you have one:
+      - ./vision/models:/models:ro
+      - ./vision/app.py:/app/app.py:ro # mount just the file
+
     ports:
       - '8081:8081'
-    environment:
-      OBJ_WEIGHTS: /app/models/yolov8n.pt
-      FACE_WEIGHTS: /app/models/yolov8n-face.pt
-      PYTHONUNBUFFERED: '1'
-
-    volumes:
-      - vision_models:/app/models
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8081', timeout=5).status in (200,405) else sys.exit(1)",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    restart: unless-stopped
 
 volumes:
   paddle_cache:
-  vision_models:
