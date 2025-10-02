@@ -2,7 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Thumbnail } from './youtube-ingest.entity';
+import { Channel } from './channel.entity';
+import { Thumbnail } from './thumbnail.entity';
 import {
   ensureDir,
   downloadToFile,
@@ -30,6 +31,19 @@ type IngestParams = {
   maxVideosPerChannel?: number;
 };
 
+type IngestAccumulators = {
+  videosSeen: { value: number };
+  imagesSaved: { value: number };
+  rowsUpserted: { value: number };
+  jsonlRecords: any[];
+  csvRows: any[][];
+};
+
+interface CSVThumbnail extends Thumbnail {
+  channelTitle: string;
+  subscribers: number;
+}
+
 @Injectable()
 export class YoutubeIngestService {
   private readonly logger = new Logger(YoutubeIngestService.name);
@@ -38,6 +52,8 @@ export class YoutubeIngestService {
   constructor(
     private readonly cfg: ConfigService,
     private readonly yt: YoutubeClient,
+    @InjectRepository(Channel)
+    private readonly channelRepo: Repository<Channel>, // NEW
     @InjectRepository(Thumbnail) private readonly repo: Repository<Thumbnail>,
   ) {
     this.dataDir = this.cfg.get('DATA_DIR', './data');
@@ -52,33 +68,336 @@ export class YoutubeIngestService {
     return path.resolve(this.dataDir, 'meta');
   }
 
-  async runIngest(params: IngestParams): Promise<IngestSummary> {
-    // inputs
-    const rawIds = params.channelIds || [];
-    const rawHandles = params.channelHandles || [];
+  /** Normalize to '@handle' */
+  private normHandle(h: string) {
+    const s = (h || '').trim();
+    if (!s) return s;
+    return s.startsWith('@') ? s : `@${s}`;
+  }
 
-    const resolvedFromHandles = (
-      await Promise.all(rawHandles.map((h) => this.yt.resolveChannelId(h)))
-    ).filter((x): x is string => !!x);
-
-    const channelIds: string[] = Array.from(
-      new Set([...rawIds, ...resolvedFromHandles]),
+  /** Discover channels from handles: resolve + upsert into channels. Returns resolved channelIds. */
+  async discoverChannelsFromHandles(handles: string[]): Promise<{
+    resolvedIds: string[];
+    notFound: string[];
+    errors: { handle: string; error: string }[];
+  }> {
+    const input = Array.from(
+      new Set(handles.map((h) => this.normHandle(h)).filter(Boolean)),
     );
 
-    const publishedAfter: string | undefined = params.publishedAfter;
+    const resolvedIds: string[] = [];
+    const notFound: string[] = [];
+    const errors: { handle: string; error: string }[] = [];
 
-    const maxVideosPerChannel: number | undefined =
-      params.maxVideosPerChannel ?? undefined;
-    const queries: string[] | undefined = params.queries ?? undefined;
+    for (const h of input) {
+      try {
+        // cheap, 1-unit call:
+        const item = await this.yt.getChannelByHandle(h);
+        if (!item?.id) {
+          notFound.push(h);
+          continue;
+        }
+        // upsert minimal channel row
+        await this.channelRepo
+          .createQueryBuilder()
+          .insert()
+          .into(Channel)
+          .values({
+            id: item.id,
+            handle: h,
+            title: item?.snippet?.title ?? '',
+            subscribers: Number(item?.statistics?.subscriberCount ?? 0),
+            viewsCount:
+              item?.statistics?.viewCount != null
+                ? Number(item.statistics.viewCount)
+                : null,
+            videosCount:
+              item?.statistics?.videoCount != null
+                ? Number(item.statistics.videoCount)
+                : null,
+            uploadsPlaylistId:
+              item?.contentDetails?.relatedPlaylists?.uploads ?? null,
+            country: item?.snippet?.country ?? null,
+            etag: (item as any)?.etag ?? null,
+            // leave scrapeStatus/markers as defaults
+          })
+          .orUpdate(
+            [
+              'handle',
+              'title',
+              'subscribers',
+              'viewsCount',
+              'videosCount',
+              'uploadsPlaylistId',
+              'country',
+              'etag',
+            ],
+            ['id'],
+          )
+          .execute();
+
+        resolvedIds.push(item.id);
+      } catch (e: any) {
+        errors.push({ handle: h, error: String(e?.message ?? e) });
+        this.logger.warn(`discover failed for ${h}: ${String(e)}`);
+      }
+    }
+
+    return { resolvedIds, notFound, errors };
+  }
+
+  /** Ingest a selection from DB (by statuses/limit), honoring 90d default window, no retries. */
+  async runIngestFromDb(input: {
+    statuses?: Array<'idle' | 'queued' | 'running' | 'done' | 'error'>;
+    limit?: number;
+    publishedAfter?: string;
+    maxVideosPerChannel?: number;
+  }): Promise<IngestSummary> {
+    const { statuses, limit, publishedAfter, maxVideosPerChannel } = input;
+    const qb = this.channelRepo
+      .createQueryBuilder('c')
+      .orderBy('c.lastIngestAt', 'ASC', 'NULLS FIRST')
+      .addOrderBy('c.id', 'ASC');
+
+    if (statuses?.length)
+      qb.andWhere('c.scrapeStatus IN (:...s)', { s: statuses });
+    if (limit && limit > 0) qb.take(limit);
+
+    const rows = await qb.getMany();
+    const ids = rows.map((r) => r.id);
+    if (!ids.length) {
+      return {
+        channelsProcessed: 0,
+        videosSeen: 0,
+        imagesSaved: 0,
+        rowsUpserted: 0,
+        tookSec: 0,
+        jsonlPath: path.join(this.metaDir(), 'records.jsonl'),
+        csvPath: path.join(this.metaDir(), 'records.csv'),
+        imageDir: this.imageDir(),
+      };
+    }
+
+    return this.ingestChannelsByIds({
+      channelIds: ids,
+      publishedAfter,
+      maxVideosPerChannel,
+    });
+  }
+
+  private async processVideoIds(
+    acc: IngestAccumulators,
+    subscribers: number,
+    channelTitle: string,
+    channelId: string,
+    videoIds: string[],
+  ) {
+    const videoItems = await this.yt.getVideos(videoIds);
+
+    const perVideo = pLimit(4);
+    await Promise.allSettled(
+      (videoItems ?? []).map((v) =>
+        perVideo(async () => {
+          acc.videosSeen.value++;
+          const vid = v?.id;
+          if (!vid) return;
+
+          const snippet = v?.snippet ?? {};
+          const statistics = v?.statistics ?? {};
+          const contentDetails = v?.contentDetails ?? {};
+          const live = v?.liveStreamingDetails ?? {};
+
+          const title: string = snippet?.title ?? '';
+          this.logger.log(title);
+
+          // choose thumbnail
+          const t = snippet?.thumbnails ?? {};
+          const chosen = t.maxres ?? t.high ?? t.medium ?? null;
+          const src = chosen?.url;
+          if (!src) {
+            this.logger.warn(`No viable thumbnail for video ${vid}, skipping.`);
+            return;
+          }
+
+          const savePath = path.join(this.imageDir(), `${vid}.jpg`);
+          if (!fs.existsSync(savePath)) {
+            try {
+              await downloadToFile(src, savePath);
+              acc.imagesSaved.value++;
+            } catch (e) {
+              this.logger.warn(
+                `Failed to download thumbnail ${src} -> ${savePath}: ${String(e)}`,
+              );
+              return;
+            }
+          }
+
+          // compute hashes + OCR
+          const buf = await fs.promises.readFile(savePath);
+          const sha = sha256Buffer(buf);
+          const ph = await pHash(savePath);
+
+          const nativeW =
+            chosen?.width ?? (await imageMeta(savePath)).width ?? null;
+          const nativeH =
+            chosen?.height ?? (await imageMeta(savePath)).height ?? null;
+
+          const ocr = await ocrBasic(savePath);
+
+          const visionRaw = await analyzeImage(savePath, {
+            title,
+            ocrText: (ocr as any)?.rawText ?? '',
+          });
+
+          const refined = refineVision(visionRaw, {
+            title,
+            ocrText: (ocr as any)?.rawText ?? '',
+          });
+
+          const faces_json = refined.faces_json;
+          const objects_json = refined.objects_json;
+          const palette_json = refined.palette_json;
+          const contrast = refined.contrast ?? null;
+
+          const publishedAt: string = snippet?.publishedAt ?? '';
+          const views = Number(statistics?.viewCount ?? 0);
+          const likes =
+            statistics?.likeCount != null ? Number(statistics.likeCount) : null;
+          const durationSec = isoDurationToSec(contentDetails?.duration);
+          const isLive =
+            live?.actualStartTime || live?.scheduledStartTime ? 1 : null;
+          const madeForKids =
+            snippet?.madeForKids === true
+              ? 1
+              : snippet?.madeForKids === false
+                ? 0
+                : null;
+          const categoryId = snippet?.categoryId ?? null;
+          const fetchedAt = new Date().toISOString();
+
+          // engagementScore = log(views)/log(subscribers+1)
+          let engagementScore: number | null = null;
+          if (subscribers && subscribers > 0 && views >= 0) {
+            const denom = Math.log(subscribers + 1);
+            engagementScore = denom > 0 ? Math.log(views + 1) / denom : null;
+          }
+
+          const split = assignSplit(channelId);
+
+          const row: Partial<Thumbnail> = {
+            videoId: vid,
+            channelId,
+            title,
+            publishedAt,
+            views,
+            likes,
+            thumbnail_savedPath: savePath,
+            thumbnail_src: src,
+            thumbnail_nativeW: nativeW,
+            thumbnail_nativeH: nativeH,
+            ocr_charCount: ocr.charCount,
+            ocr_areaPct: ocr.areaPct,
+            engagementScore,
+            hash_pHash: ph,
+            hash_sha256: sha,
+            split,
+            fetchedAt,
+            categoryId,
+            tags_json: null,
+            durationSec,
+            isLive,
+            madeForKids,
+            faces_json,
+            objects_json,
+            palette_json,
+            contrast,
+            entropy: null,
+            saliency_json: null,
+            flags_json: null,
+            etag: v?.etag ?? null,
+            notes: null,
+          };
+
+          await this.repo.upsert(row as CSVThumbnail, ['videoId']);
+          acc.rowsUpserted.value++;
+
+          acc.jsonlRecords.push(row);
+          acc.csvRows.push([
+            row.videoId,
+            row.channelId,
+            channelTitle,
+            row.title,
+            row.publishedAt,
+            row.views,
+            row.likes,
+            subscribers,
+            row.thumbnail_savedPath,
+            row.thumbnail_src,
+            row.thumbnail_nativeW,
+            row.thumbnail_nativeH,
+            row.ocr_charCount,
+            row.ocr_areaPct,
+            row.engagementScore,
+            row.hash_pHash,
+            row.hash_sha256,
+            row.split,
+            row.fetchedAt,
+            refined.csv.faces_count,
+            refined.csv.faces_largest_areaPct,
+            refined.contrast ?? null,
+            refined.csv.palette_top1,
+            refined.csv.tags,
+          ]);
+        }),
+      ),
+    );
+  }
+
+  // helper to compute publishedAfter with default 90 days and small overlap ---
+  private computePublishedAfter(
+    channel: { lastVideoPublishedAt: string | null } | null,
+    overrideAfter?: string,
+  ): string {
+    if (overrideAfter) return overrideAfter; // trust caller-provided window
+
+    const overlapMs = 5 * 60 * 1000; // 5 min overlap for safety
+    const now = Date.now();
+    const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
+    const defaultFrom = new Date(now - ninetyDaysMs);
+
+    if (channel?.lastVideoPublishedAt) {
+      const t = new Date(channel.lastVideoPublishedAt).getTime();
+      const d = new Date(Math.max(0, t - overlapMs));
+      return d.toISOString();
+    }
+    return defaultFrom.toISOString();
+  }
+
+  /**
+   * NEW: Ingest videos for a list of channel IDs (UC…)
+   * - uses search.list by channelId (NOT playlistItems)
+   * - default window is 90 days (unless override provided)
+   * - no retry policy; failures set channel status to 'error'
+   * - does NOT refresh subscribers/views/videos (those are discovery-only)
+   */
+  async ingestChannelsByIds(input: {
+    channelIds: string[];
+    publishedAfter?: string; // optional override (ISO)
+    maxVideosPerChannel?: number; // optional soft cap
+  }): Promise<IngestSummary> {
+    const { channelIds, publishedAfter, maxVideosPerChannel } = input;
 
     const start = Date.now();
     let channelsProcessed = 0;
-    let videosSeen = 0;
-    let imagesSaved = 0;
-    let rowsUpserted = 0;
 
-    const jsonlRecords: any[] = [];
-    const csvRows: any[][] = [];
+    // accumulators shared across the run
+    const acc: IngestAccumulators = {
+      videosSeen: { value: 0 },
+      imagesSaved: { value: 0 },
+      rowsUpserted: { value: 0 },
+      jsonlRecords: [],
+      csvRows: [],
+    };
 
     const csvHeaders = [
       'videoId',
@@ -107,357 +426,151 @@ export class YoutubeIngestService {
       'tags',
     ];
 
-    // Separate limiters so channel-level jobs don't starve chunk/per-video work
     const channelLimit = pLimit(3);
     const chunkLimit = pLimit(6);
 
-    // Helper to process a batch of videoIds
-    const processVideoIds = async (
-      subscribers: number,
-      channelTitle: string,
-      channelId: string,
-      videoIds: string[],
-    ) => {
-      const videoItems = await this.yt.getVideos(videoIds);
+    const tasks: Promise<void>[] = [];
 
-      // Run a few per-video heavy tasks in parallel (download, OCR, vision, upsert)
-      const perVideo = pLimit(4);
-      await Promise.allSettled(
-        (videoItems ?? []).map((v) =>
-          perVideo(async () => {
-            videosSeen++;
-            const vid = v?.id;
-            if (!vid) return;
-
-            const snippet = v?.snippet ?? {};
-            const statistics = v?.statistics ?? {};
-            const contentDetails = v?.contentDetails ?? {};
-            const live = v?.liveStreamingDetails ?? {};
-
-            const title: string = snippet?.title ?? '';
-
-            this.logger.log(title);
-
-            // choose thumbnail
-            const t = snippet?.thumbnails ?? {};
-            const chosen = t.maxres ?? t.high ?? t.medium ?? null;
-            const src = chosen?.url;
-            if (!src) {
-              this.logger.warn(
-                `No viable thumbnail for video ${vid}, skipping.`,
-              );
-              return;
-            }
-
-            const savePath = path.join(this.imageDir(), `${vid}.jpg`);
-            // Dedup/skip if already exists by videoId
-            if (!fs.existsSync(savePath)) {
-              try {
-                await downloadToFile(src, savePath);
-                imagesSaved++;
-              } catch (e) {
-                this.logger.warn(
-                  `Failed to download thumbnail ${src} -> ${savePath}: ${String(e)}`,
-                );
-                return;
-              }
-            }
-
-            // compute hashes + OCR
-            const buf = await fs.promises.readFile(savePath);
-            const sha = sha256Buffer(buf);
-            const ph = await pHash(savePath);
-
-            const nativeW =
-              chosen?.width ?? (await imageMeta(savePath)).width ?? null;
-            const nativeH =
-              chosen?.height ?? (await imageMeta(savePath)).height ?? null;
-
-            const ocr = await ocrBasic(savePath);
-
-            const visionRaw = await analyzeImage(savePath, {
-              title,
-              ocrText: (ocr as any)?.rawText ?? '',
-            });
-
-            const refined = refineVision(visionRaw, {
-              title,
-              ocrText: (ocr as any)?.rawText ?? '',
-            });
-
-            // --- map refined outputs ---
-            const faces_json = refined.faces_json; // already string or null
-            const objects_json = refined.objects_json; // already string
-            const palette_json = refined.palette_json; // already string
-            const contrast = refined.contrast ?? null;
-
-            const publishedAt: string = snippet?.publishedAt ?? '';
-            const views = Number(statistics?.viewCount ?? 0);
-            const likes =
-              statistics?.likeCount != null
-                ? Number(statistics.likeCount)
-                : null;
-            const durationSec = isoDurationToSec(contentDetails?.duration);
-            const isLive =
-              live?.actualStartTime || live?.scheduledStartTime ? 1 : null;
-            const madeForKids =
-              snippet?.madeForKids === true
-                ? 1
-                : snippet?.madeForKids === false
-                  ? 0
-                  : null;
-            const categoryId = snippet?.categoryId ?? null;
-            const fetchedAt = new Date().toISOString();
-
-            // engagementScore = log(views)/log(subscribers+1)
-            let engagementScore: number | null = null;
-            if (subscribers && subscribers > 0 && views >= 0) {
-              const denom = Math.log(subscribers + 1);
-              engagementScore = denom > 0 ? Math.log(views + 1) / denom : null;
-            }
-
-            const split = assignSplit(channelId);
-
-            const row: Partial<Thumbnail> = {
-              videoId: vid,
-              channelId,
-              channelTitle,
-              title,
-              publishedAt,
-              views,
-              likes,
-              subscribers,
-              thumbnail_savedPath: savePath,
-              thumbnail_src: src,
-              thumbnail_nativeW: nativeW,
-              thumbnail_nativeH: nativeH,
-              ocr_charCount: ocr.charCount,
-              ocr_areaPct: ocr.areaPct,
-              engagementScore,
-              hash_pHash: ph,
-              hash_sha256: sha,
-              split,
-              fetchedAt,
-              // future fields kept null for now:
-              categoryId,
-              tags_json: null,
-              durationSec,
-              isLive,
-              madeForKids,
-              faces_json,
-              objects_json,
-              palette_json,
-              contrast,
-              entropy: null,
-              saliency_json: null,
-              flags_json: null,
-              etag: v?.etag ?? null,
-              notes: null,
-            };
-
-            // Upsert
-            await this.repo.upsert(row as Thumbnail, ['videoId']);
-            rowsUpserted++;
-
-            // Export buffers
-            jsonlRecords.push(row);
-            csvRows.push([
-              row.videoId,
-              row.channelId,
-              row.channelTitle,
-              row.title,
-              row.publishedAt,
-              row.views,
-              row.likes,
-              row.subscribers,
-              row.thumbnail_savedPath,
-              row.thumbnail_src,
-              row.thumbnail_nativeW,
-              row.thumbnail_nativeH,
-              row.ocr_charCount,
-              row.ocr_areaPct,
-              row.engagementScore,
-              row.hash_pHash,
-              row.hash_sha256,
-              row.split,
-              row.fetchedAt,
-              refined.csv.faces_count,
-              refined.csv.faces_largest_areaPct,
-              refined.contrast ?? null,
-              refined.csv.palette_top1,
-              refined.csv.tags,
-            ]);
-          }),
-        ),
-      );
-    };
-
-    // --- Ingest by channels (parallel, bounded) ---
-    const channelTasks: Promise<void>[] = [];
-    for (const channelId of channelIds) {
-      channelTasks.push(
+    for (const cid of new Set(channelIds)) {
+      tasks.push(
         channelLimit(async () => {
+          const channelRow = await this.channelRepo.findOne({
+            where: { id: cid },
+          });
+          const afterIso = this.computePublishedAfter(
+            channelRow ?? null,
+            publishedAfter,
+          );
+
+          if (channelRow) {
+            await this.channelRepo.update(
+              { id: cid },
+              { scrapeStatus: 'running', scrapeError: null },
+            );
+          }
+
           try {
-            const ch = await this.yt.getChannel(channelId);
+            const ch = await this.yt.getChannel(cid);
             const item = ch?.items?.[0];
             if (!item) {
-              this.logger.warn(`Channel not found: ${channelId}`);
+              this.logger.warn(`Channel not found: ${cid}`);
+              if (channelRow)
+                await this.channelRepo.update(
+                  { id: cid },
+                  { scrapeStatus: 'error', scrapeError: 'not_found' },
+                );
               return;
             }
             const subscribers = Number(item?.statistics?.subscriberCount ?? 0);
             const channelTitle = item?.snippet?.title ?? '';
 
-            console.log('Fetching videos for', channelTitle);
-
-            // Use search.list by channel
             let pageToken: string | undefined;
             let collectedVideoIds: string[] = [];
+            let mostRecentPublishedAt: string | null = null;
+
             do {
               const res = await this.yt.searchChannelUploads(
-                channelId,
-                publishedAfter,
+                cid,
+                afterIso,
                 pageToken,
               );
               const items: any[] = res?.items ?? [];
               const vids = items
-                .map((it: any) => it?.id?.videoId)
-                .filter(Boolean);
+                .map((it: any) => {
+                  const vid = it?.id?.videoId;
+                  const pa = it?.snippet?.publishedAt as string | undefined;
+                  if (
+                    pa &&
+                    (!mostRecentPublishedAt || pa > mostRecentPublishedAt)
+                  ) {
+                    mostRecentPublishedAt = pa;
+                  }
+                  return vid;
+                })
+                .filter(Boolean) as string[];
+
               collectedVideoIds.push(...vids);
               pageToken = res?.nextPageToken;
+
               if (
                 maxVideosPerChannel &&
                 collectedVideoIds.length >= maxVideosPerChannel
-              )
-                break;
+              ) {
+                collectedVideoIds = collectedVideoIds.slice(
+                  0,
+                  maxVideosPerChannel,
+                );
+                pageToken = undefined;
+              }
             } while (pageToken);
 
-            if (
-              maxVideosPerChannel &&
-              collectedVideoIds.length > maxVideosPerChannel
-            ) {
-              collectedVideoIds = collectedVideoIds.slice(
-                0,
-                maxVideosPerChannel,
-              );
-            }
-
-            // Process chunks in parallel (bounded)
             const chunkSize = 50;
             const chunkTasks: Promise<void>[] = [];
             for (let i = 0; i < collectedVideoIds.length; i += chunkSize) {
               const chunk = collectedVideoIds.slice(i, i + chunkSize);
-              this.logger.log(`Processing chunk of ${chunk.length} videos`);
               chunkTasks.push(
                 chunkLimit(() =>
-                  processVideoIds(subscribers, channelTitle, channelId, chunk),
+                  this.processVideoIds(
+                    acc,
+                    subscribers,
+                    channelTitle,
+                    cid,
+                    chunk,
+                  ),
                 ),
               );
             }
             await Promise.allSettled(chunkTasks);
+
+            const markers: Partial<Channel> = {
+              lastIngestAt: new Date().toISOString(),
+            };
+            if (mostRecentPublishedAt)
+              markers.lastVideoPublishedAt = mostRecentPublishedAt;
+
+            if (channelRow) {
+              await this.channelRepo.update(
+                { id: cid },
+                { ...markers, scrapeStatus: 'done' },
+              );
+            }
+
             channelsProcessed++;
           } catch (e) {
-            this.logger.error(`Failed channel ${channelId}: ${String(e)}`);
+            if (channelRow) {
+              await this.channelRepo.update(
+                { id: cid },
+                { scrapeStatus: 'error', scrapeError: String(e) },
+              );
+            }
+            this.logger.error(`Ingest failed for channel ${cid}: ${String(e)}`);
           }
         }),
       );
     }
-    await Promise.allSettled(channelTasks);
 
-    // --- Optional query mode (parallel, bounded by channelLimit) ---
-    if (queries?.length) {
-      const queryTasks: Promise<void>[] = [];
-      for (const q of queries) {
-        queryTasks.push(
-          channelLimit(async () => {
-            try {
-              let pageToken: string | undefined;
-              let round = 0;
-              do {
-                const res = await this.yt.searchByQuery(
-                  q,
-                  publishedAfter,
-                  pageToken,
-                );
-                const items: any[] = res?.items ?? [];
-                const byChannel: Record<string, string[]> = {};
-                const channelTitles: Record<string, string> = {};
-                for (const it of items) {
-                  const vid = it?.id?.videoId;
-                  const cid = it?.snippet?.channelId;
-                  const ct = it?.snippet?.channelTitle ?? '';
-                  if (vid && cid) {
-                    (byChannel[cid] ||= []).push(vid);
-                    channelTitles[cid] = ct;
-                  }
-                }
-
-                // Fetch subscribers per channel for engagement score
-                const perChannelTasks: Promise<void>[] = [];
-                for (const [cid, vids] of Object.entries(byChannel)) {
-                  perChannelTasks.push(
-                    channelLimit(async () => {
-                      try {
-                        const ch = await this.yt.getChannel(cid);
-                        const item = ch?.items?.[0];
-                        const subs = Number(
-                          item?.statistics?.subscriberCount ?? 0,
-                        );
-                        const ct =
-                          channelTitles[cid] ?? item?.snippet?.title ?? '';
-                        // process in parallel (bounded)
-                        const chunkSize = 50;
-                        const chunkTasks: Promise<void>[] = [];
-                        for (let i = 0; i < vids.length; i += chunkSize) {
-                          const chunk = vids.slice(i, i + chunkSize);
-                          chunkTasks.push(
-                            chunkLimit(() =>
-                              processVideoIds(subs, ct, cid, chunk),
-                            ),
-                          );
-                        }
-                        await Promise.allSettled(chunkTasks);
-                      } catch (e) {
-                        this.logger.warn(
-                          `Query mode channel fetch failed ${cid}: ${String(e)}`,
-                        );
-                      }
-                    }),
-                  );
-                }
-                await Promise.allSettled(perChannelTasks);
-
-                pageToken = res?.nextPageToken;
-                round++;
-                if (maxVideosPerChannel && round * 50 >= maxVideosPerChannel)
-                  break; // soft cap
-              } while (pageToken);
-            } catch (e) {
-              this.logger.error(`Query "${q}" failed: ${String(e)}`);
-            }
-          }),
-        );
-      }
-      await Promise.allSettled(queryTasks);
-    }
+    await Promise.allSettled(tasks);
 
     // Write exports
     const jsonlPath = path.join(this.metaDir(), 'records.jsonl');
     const csvPath = path.join(this.metaDir(), 'records.csv');
-    writeJsonl(jsonlPath, jsonlRecords);
-    writeCsv(csvPath, csvHeaders, csvRows);
+    writeJsonl(jsonlPath, acc.jsonlRecords);
+    writeCsv(csvPath, csvHeaders, acc.csvRows);
 
     const took = Math.round((Date.now() - start) / 1000);
-    const summary = {
+    const summary: IngestSummary = {
       channelsProcessed,
-      videosSeen,
-      imagesSaved,
-      rowsUpserted,
+      videosSeen: acc.videosSeen.value,
+      imagesSaved: acc.imagesSaved.value,
+      rowsUpserted: acc.rowsUpserted.value,
       tookSec: took,
       jsonlPath,
       csvPath,
       imageDir: this.imageDir(),
     };
-    this.logger.log(`Ingest summary: ${JSON.stringify(summary, null, 2)}`);
+    this.logger.log(
+      `Channel-ingest summary: ${JSON.stringify(summary, null, 2)}`,
+    );
     return summary;
   }
 }

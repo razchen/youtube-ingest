@@ -4,7 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { YoutubeIngestController } from './youtube-ingest.controller';
 import { YoutubeIngestService } from './youtube-ingest.service';
-import { Thumbnail } from './youtube-ingest.entity';
+import { Thumbnail } from './thumbnail.entity';
 import { YoutubeClient } from './youtube.client';
 
 @Module({

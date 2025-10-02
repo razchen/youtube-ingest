@@ -1,4 +1,12 @@
-import { Column, Entity, PrimaryColumn, Index } from 'typeorm';
+import {
+  Column,
+  Entity,
+  PrimaryColumn,
+  Index,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
+import { Channel } from './channel.entity';
 
 @Entity({ name: 'thumbnails' })
 export class Thumbnail {
@@ -8,9 +16,6 @@ export class Thumbnail {
   @Index()
   @Column({ type: 'varchar', length: 64 })
   channelId!: string;
-
-  @Column({ type: 'text' })
-  channelTitle!: string;
 
   @Column({ type: 'text' })
   title!: string;
@@ -23,9 +28,6 @@ export class Thumbnail {
 
   @Column({ type: 'bigint', nullable: true })
   likes!: number | null;
-
-  @Column({ type: 'bigint' })
-  subscribers!: number;
 
   @Column({ type: 'text' })
   thumbnail_savedPath!: string;
@@ -107,4 +109,12 @@ export class Thumbnail {
 
   @Column({ type: 'longtext', nullable: true })
   notes!: string | null;
+
+  @ManyToOne(() => Channel, (c) => c.thumbnails, {
+    onDelete: 'NO ACTION',
+    onUpdate: 'NO ACTION',
+    nullable: true,
+  })
+  @JoinColumn({ name: 'channelId', referencedColumnName: 'id' })
+  channel?: Channel;
 }

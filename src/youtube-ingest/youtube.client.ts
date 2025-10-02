@@ -72,38 +72,7 @@ export class YoutubeClient {
         maxResults: 1,
       },
     );
-    return res.data;
-  }
-
-  async getChannelByUsername(username: string) {
-    const res = await this.get<YoutubeApiResponse<YoutubeChannel>>(
-      '/channels',
-      {
-        part: 'id,snippet,statistics,contentDetails',
-        forUsername: username,
-        maxResults: 1,
-      },
-    );
-    return res.data;
-  }
-
-  /** Returns a canonical channelId for: UC-id | @handle | handle | legacy username */
-  async resolveChannelId(input: string): Promise<string | null> {
-    const s = input.trim();
-
-    // already a channel id
-    if (/^UC[A-Za-z0-9_-]{22}$/.test(s)) return s;
-
-    // try handle
-    try {
-      const byHandle = await this.getChannelByHandle(s);
-      const it = byHandle?.items?.[0];
-      if (it?.id) return it.id;
-    } catch {
-      //
-    }
-
-    return null;
+    return res.data?.items?.[0] ?? null;
   }
 
   async getChannel(

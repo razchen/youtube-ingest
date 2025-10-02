@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { YoutubeIngestModule } from './youtube-ingest/youtube-ingest.module';
-import { Thumbnail } from './youtube-ingest/youtube-ingest.entity';
+import { Thumbnail } from './youtube-ingest/thumbnail.entity';
 
 @Module({
   imports: [
