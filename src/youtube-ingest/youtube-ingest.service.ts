@@ -24,6 +24,7 @@ import { IngestSummary } from '@/types/ingest';
 
 type IngestParams = {
   channelIds?: string[];
+  channelHandles?: string[];
   queries?: string[];
   publishedAfter?: string;
   maxVideosPerChannel?: number;
@@ -52,22 +53,19 @@ export class YoutubeIngestService {
   }
 
   async runIngest(params: IngestParams): Promise<IngestSummary> {
-    const cfgChannels: string[] = (
-      this.cfg.get<string>('INGEST_CHANNEL_IDS', '') || ''
-    )
-      .split(',')
-      .map((s: string) => s.trim())
-      .filter(Boolean);
+    // inputs
+    const rawIds = params.channelIds || [];
+    const rawHandles = params.channelHandles || [];
 
-    const channelIds: string[] =
-      params.channelIds && params.channelIds.length > 0
-        ? params.channelIds
-        : cfgChannels;
+    const resolvedFromHandles = (
+      await Promise.all(rawHandles.map((h) => this.yt.resolveChannelId(h)))
+    ).filter((x): x is string => !!x);
 
-    const publishedAfter: string | undefined =
-      params.publishedAfter ||
-      this.cfg.get<string>('INGEST_PUBLISHED_AFTER') ||
-      undefined;
+    const channelIds: string[] = Array.from(
+      new Set([...rawIds, ...resolvedFromHandles]),
+    );
+
+    const publishedAfter: string | undefined = params.publishedAfter;
 
     const maxVideosPerChannel: number | undefined =
       params.maxVideosPerChannel ?? undefined;

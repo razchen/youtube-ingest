@@ -1,5 +1,6 @@
 export interface IngestParams {
   channelIds?: string[];
+  channelHandles?: string[];
   queries?: string[];
   publishedAfter?: string;
   maxVideosPerChannel?: number;
