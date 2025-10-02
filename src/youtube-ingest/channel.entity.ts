@@ -52,12 +52,12 @@ export class Channel {
 
   /** Tracking ingestion state */
   @Index()
-  @Column({ type: 'text', nullable: true })
-  lastIngestAt!: string | null; // ISO
+  @Column({ type: 'datetime', precision: 3, nullable: true })
+  lastIngestAt!: Date | null;
 
   @Index()
-  @Column({ type: 'text', nullable: true })
-  lastVideoPublishedAt!: string | null; // ISO of most recent video seen
+  @Column({ type: 'datetime', precision: 3, nullable: true })
+  lastVideoPublishedAt!: Date | null;
 
   @Index()
   @Column({

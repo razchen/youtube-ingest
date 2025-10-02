@@ -23,14 +23,6 @@ import pLimit from 'p-limit';
 import { YoutubeClient } from './youtube.client';
 import { IngestSummary } from '@/types/ingest';
 
-type IngestParams = {
-  channelIds?: string[];
-  channelHandles?: string[];
-  queries?: string[];
-  publishedAfter?: string;
-  maxVideosPerChannel?: number;
-};
-
 type IngestAccumulators = {
   videosSeen: { value: number };
   imagesSaved: { value: number };
@@ -93,6 +85,8 @@ export class YoutubeIngestService {
       try {
         // cheap, 1-unit call:
         const item = await this.yt.getChannelByHandle(h);
+        const title = item?.snippet?.title ?? '';
+        this.logger.log(title);
         if (!item?.id) {
           notFound.push(h);
           continue;
@@ -105,20 +99,17 @@ export class YoutubeIngestService {
           .values({
             id: item.id,
             handle: h,
-            title: item?.snippet?.title ?? '',
+            title,
             subscribers: Number(item?.statistics?.subscriberCount ?? 0),
             viewsCount:
               item?.statistics?.viewCount != null
                 ? Number(item.statistics.viewCount)
                 : null,
-            videosCount:
-              item?.statistics?.videoCount != null
-                ? Number(item.statistics.videoCount)
-                : null,
+            videosCount: Number(item?.statistics?.videoCount ?? 0),
             uploadsPlaylistId:
               item?.contentDetails?.relatedPlaylists?.uploads ?? null,
-            country: item?.snippet?.country ?? null,
-            etag: (item as any)?.etag ?? null,
+            country: null,
+            etag: item.etag,
             // leave scrapeStatus/markers as defaults
           })
           .orUpdate(
@@ -146,6 +137,58 @@ export class YoutubeIngestService {
     return { resolvedIds, notFound, errors };
   }
 
+  /** Build ingest payload from DB rows and run ingest (no YouTube channel fetch). */
+  // async ingestChannelsUsingDbRecords(input: {
+  //   channelIds: string[];
+  //   publishedAfter?: string;
+  //   maxVideosPerChannel?: number;
+  // }): Promise<IngestSummary> {
+  //   if (!input.channelIds.length) {
+  //     return {
+  //       channelsProcessed: 0,
+  //       videosSeen: 0,
+  //       imagesSaved: 0,
+  //       rowsUpserted: 0,
+  //       tookSec: 0,
+  //       jsonlPath: path.join(this.metaDir(), 'records.jsonl'),
+  //       csvPath: path.join(this.metaDir(), 'records.csv'),
+  //       imageDir: this.imageDir(),
+  //     };
+  //   }
+
+  //   const rows = await this.channelRepo
+  //     .createQueryBuilder('c')
+  //     .where('c.id IN (:...ids)', { ids: input.channelIds })
+  //     .getMany();
+
+  //   // Skip any ids not found in DB (no remote fetch)
+  //   const payload = rows.map((r) => ({
+  //     id: r.id,
+  //     title: r.title ?? '',
+  //     subscribers: Number(r.subscribers ?? 0),
+  //   }));
+
+  //   if (!payload.length) {
+  //     this.logger.warn('No matching channels in DB for provided ids.');
+  //     return {
+  //       channelsProcessed: 0,
+  //       videosSeen: 0,
+  //       imagesSaved: 0,
+  //       rowsUpserted: 0,
+  //       tookSec: 0,
+  //       jsonlPath: path.join(this.metaDir(), 'records.jsonl'),
+  //       csvPath: path.join(this.metaDir(), 'records.csv'),
+  //       imageDir: this.imageDir(),
+  //     };
+  //   }
+
+  //   return this.ingestChannelsByIds(
+  //     payload,
+  //     input.publishedAfter,
+  //     input.maxVideosPerChannel,
+  //   );
+  // }
+
   /** Ingest a selection from DB (by statuses/limit), honoring 90d default window, no retries. */
   async runIngestFromDb(input: {
     statuses?: Array<'idle' | 'queued' | 'running' | 'done' | 'error'>;
@@ -154,9 +197,10 @@ export class YoutubeIngestService {
     maxVideosPerChannel?: number;
   }): Promise<IngestSummary> {
     const { statuses, limit, publishedAfter, maxVideosPerChannel } = input;
+
     const qb = this.channelRepo
       .createQueryBuilder('c')
-      .orderBy('c.lastIngestAt', 'ASC', 'NULLS FIRST')
+      .orderBy('c.lastIngestAt', 'ASC')
       .addOrderBy('c.id', 'ASC');
 
     if (statuses?.length)
@@ -164,8 +208,13 @@ export class YoutubeIngestService {
     if (limit && limit > 0) qb.take(limit);
 
     const rows = await qb.getMany();
-    const ids = rows.map((r) => r.id);
-    if (!ids.length) {
+    const channels = rows.map((r) => ({
+      id: r.id,
+      title: r.title ?? '',
+      subscribers: Number(r.subscribers ?? 0),
+    }));
+
+    if (!channels.length) {
       return {
         channelsProcessed: 0,
         videosSeen: 0,
@@ -178,11 +227,11 @@ export class YoutubeIngestService {
       };
     }
 
-    return this.ingestChannelsByIds({
-      channelIds: ids,
+    return this.ingestChannelsByIds(
+      channels,
       publishedAfter,
       maxVideosPerChannel,
-    });
+    );
   }
 
   private async processVideoIds(
@@ -318,7 +367,7 @@ export class YoutubeIngestService {
             notes: null,
           };
 
-          await this.repo.upsert(row as CSVThumbnail, ['videoId']);
+          await this.repo.upsert(row, ['videoId']);
           acc.rowsUpserted.value++;
 
           acc.jsonlRecords.push(row);
@@ -355,38 +404,30 @@ export class YoutubeIngestService {
 
   // helper to compute publishedAfter with default 90 days and small overlap ---
   private computePublishedAfter(
-    channel: { lastVideoPublishedAt: string | null } | null,
-    overrideAfter?: string,
-  ): string {
-    if (overrideAfter) return overrideAfter; // trust caller-provided window
-
-    const overlapMs = 5 * 60 * 1000; // 5 min overlap for safety
-    const now = Date.now();
-    const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-    const defaultFrom = new Date(now - ninetyDaysMs);
-
+    channel: { lastVideoPublishedAt: Date | null } | null,
+    override?: string,
+  ) {
+    if (override) return override;
+    const overlapMs = 5 * 60 * 1000;
+    const defaultFrom = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
     if (channel?.lastVideoPublishedAt) {
-      const t = new Date(channel.lastVideoPublishedAt).getTime();
-      const d = new Date(Math.max(0, t - overlapMs));
-      return d.toISOString();
+      const t = channel.lastVideoPublishedAt.getTime();
+      return new Date(t - overlapMs).toISOString();
     }
     return defaultFrom.toISOString();
   }
 
   /**
-   * NEW: Ingest videos for a list of channel IDs (UC…)
-   * - uses search.list by channelId (NOT playlistItems)
+   * Ingest videos for a list of channels (pre-supplied title & subscribers)
+   * - uses search.list by channelId
    * - default window is 90 days (unless override provided)
-   * - no retry policy; failures set channel status to 'error'
-   * - does NOT refresh subscribers/views/videos (those are discovery-only)
+   * - no retry policy; does NOT refresh subscribers/views/videos
    */
-  async ingestChannelsByIds(input: {
-    channelIds: string[];
-    publishedAfter?: string; // optional override (ISO)
-    maxVideosPerChannel?: number; // optional soft cap
-  }): Promise<IngestSummary> {
-    const { channelIds, publishedAfter, maxVideosPerChannel } = input;
-
+  async ingestChannelsByIds(
+    channels: Array<{ id: string; title: string; subscribers: number }>,
+    publishedAfter?: string,
+    maxVideosPerChannel?: number,
+  ): Promise<IngestSummary> {
     const start = Date.now();
     let channelsProcessed = 0;
 
@@ -431,7 +472,8 @@ export class YoutubeIngestService {
 
     const tasks: Promise<void>[] = [];
 
-    for (const cid of new Set(channelIds)) {
+    for (const channel of channels) {
+      const { id: cid, title: channelTitle, subscribers } = channel;
       tasks.push(
         channelLimit(async () => {
           const channelRow = await this.channelRepo.findOne({
@@ -450,20 +492,6 @@ export class YoutubeIngestService {
           }
 
           try {
-            const ch = await this.yt.getChannel(cid);
-            const item = ch?.items?.[0];
-            if (!item) {
-              this.logger.warn(`Channel not found: ${cid}`);
-              if (channelRow)
-                await this.channelRepo.update(
-                  { id: cid },
-                  { scrapeStatus: 'error', scrapeError: 'not_found' },
-                );
-              return;
-            }
-            const subscribers = Number(item?.statistics?.subscriberCount ?? 0);
-            const channelTitle = item?.snippet?.title ?? '';
-
             let pageToken: string | undefined;
             let collectedVideoIds: string[] = [];
             let mostRecentPublishedAt: string | null = null;
@@ -504,6 +532,7 @@ export class YoutubeIngestService {
               }
             } while (pageToken);
 
+            // hydrate & persist
             const chunkSize = 50;
             const chunkTasks: Promise<void>[] = [];
             for (let i = 0; i < collectedVideoIds.length; i += chunkSize) {
@@ -523,7 +552,7 @@ export class YoutubeIngestService {
             await Promise.allSettled(chunkTasks);
 
             const markers: Partial<Channel> = {
-              lastIngestAt: new Date().toISOString(),
+              lastIngestAt: new Date(),
             };
             if (mostRecentPublishedAt)
               markers.lastVideoPublishedAt = mostRecentPublishedAt;

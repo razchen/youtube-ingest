@@ -129,7 +129,7 @@ export class ChannelService {
 
     const qb = this.repo
       .createQueryBuilder('c')
-      .orderBy('c.lastIngestAt', 'ASC', 'NULLS FIRST')
+      .orderBy('c.lastIngestAt', 'ASC')
       .addOrderBy('c.id', 'ASC');
 
     if (statuses?.length) {

@@ -22,6 +22,7 @@ import { Thumbnail } from './youtube-ingest/thumbnail.entity';
         entities: [Thumbnail],
         synchronize: true, // OK for MVP; switch to migrations for prod
         charset: 'utf8mb4',
+        autoLoadEntities: true,
       }),
     }),
     YoutubeIngestModule,

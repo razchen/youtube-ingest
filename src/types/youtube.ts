@@ -25,6 +25,7 @@ export interface YoutubeStatistics {
   likeCount?: string;
   commentCount?: string;
   subscriberCount?: string;
+  videoCount?: string;
 }
 
 export interface YoutubeContentDetails {
@@ -33,6 +34,7 @@ export interface YoutubeContentDetails {
 
 export interface YoutubeChannel {
   id: string;
+  etag?: string;
   snippet?: { title?: string };
   statistics?: YoutubeStatistics;
   contentDetails?: { relatedPlaylists?: { uploads: string } };

@@ -6,7 +6,7 @@ import minimist, { ParsedArgs } from 'minimist';
 
 // Examples:
 // npm run ingest -- --discover-only --handles @mrbeast,@veritasium
-// npm run ingest -- --from-db --statuses idle,queued --limit 20
+// npm run ingest -- --from-db --statuses idle,queued --max 3
 // npm run ingest -- --channels @mrbeast,@mkbhd --max 100
 // npm run ingest -- --queries "cat videos,dog videos" --after 2025-08-01
 
