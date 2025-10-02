@@ -4,13 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Channel } from './channel.entity';
 import { Thumbnail } from './thumbnail.entity';
-import {
-  ensureDir,
-  downloadToFile,
-  imageMeta,
-  writeCsv,
-  writeJsonl,
-} from '../common/fs.util';
+import { ensureDir, downloadToFile, imageMeta } from '../common/fs.util';
 import { sha256Buffer, pHash, assignSplit } from '../common/hash.util';
 import { isoDurationToSec } from '../common/time.util';
 import { ocrBasic } from '../common/ocr.util';
@@ -22,19 +16,13 @@ import * as fs from 'fs';
 import pLimit from 'p-limit';
 import { YoutubeClient } from './youtube.client';
 import { IngestSummary } from '@/types/ingest';
+import { YoutubeSearchItem } from '@/types/youtube';
 
 type IngestAccumulators = {
   videosSeen: { value: number };
   imagesSaved: { value: number };
   rowsUpserted: { value: number };
-  jsonlRecords: any[];
-  csvRows: any[][];
 };
-
-interface CSVThumbnail extends Thumbnail {
-  channelTitle: string;
-  subscribers: number;
-}
 
 @Injectable()
 export class YoutubeIngestService {
@@ -129,6 +117,7 @@ export class YoutubeIngestService {
 
         resolvedIds.push(item.id);
       } catch (e: any) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         errors.push({ handle: h, error: String(e?.message ?? e) });
         this.logger.warn(`discover failed for ${h}: ${String(e)}`);
       }
@@ -170,8 +159,6 @@ export class YoutubeIngestService {
         imagesSaved: 0,
         rowsUpserted: 0,
         tookSec: 0,
-        jsonlPath: path.join(this.metaDir(), 'records.jsonl'),
-        csvPath: path.join(this.metaDir(), 'records.csv'),
         imageDir: this.imageDir(),
       };
     }
@@ -318,34 +305,6 @@ export class YoutubeIngestService {
 
           await this.repo.upsert(row, ['videoId']);
           acc.rowsUpserted.value++;
-
-          acc.jsonlRecords.push(row);
-          acc.csvRows.push([
-            row.videoId,
-            row.channelId,
-            channelTitle,
-            row.title,
-            row.publishedAt,
-            row.views,
-            row.likes,
-            subscribers,
-            row.thumbnail_savedPath,
-            row.thumbnail_src,
-            row.thumbnail_nativeW,
-            row.thumbnail_nativeH,
-            row.ocr_charCount,
-            row.ocr_areaPct,
-            row.engagementScore,
-            row.hash_pHash,
-            row.hash_sha256,
-            row.split,
-            row.fetchedAt,
-            refined.csv.faces_count,
-            refined.csv.faces_largest_areaPct,
-            refined.contrast ?? null,
-            refined.csv.palette_top1,
-            refined.csv.tags,
-          ]);
         }),
       ),
     );
@@ -385,36 +344,7 @@ export class YoutubeIngestService {
       videosSeen: { value: 0 },
       imagesSaved: { value: 0 },
       rowsUpserted: { value: 0 },
-      jsonlRecords: [],
-      csvRows: [],
     };
-
-    const csvHeaders = [
-      'videoId',
-      'channelId',
-      'channelTitle',
-      'title',
-      'publishedAt',
-      'views',
-      'likes',
-      'subscribers',
-      'thumbnail_savedPath',
-      'thumbnail_src',
-      'thumbnail_nativeW',
-      'thumbnail_nativeH',
-      'ocr_charCount',
-      'ocr_areaPct',
-      'engagementScore',
-      'hash_pHash',
-      'hash_sha256',
-      'split',
-      'fetchedAt',
-      'faces_count',
-      'faces_largest_areaPct',
-      'contrast',
-      'palette_top1',
-      'tags',
-    ];
 
     const channelLimit = pLimit(3);
     const chunkLimit = pLimit(6);
@@ -451,11 +381,11 @@ export class YoutubeIngestService {
                 afterIso,
                 pageToken,
               );
-              const items: any[] = res?.items ?? [];
+              const items: YoutubeSearchItem[] = res?.items ?? [];
               const vids = items
-                .map((it: any) => {
+                .map((it: YoutubeSearchItem) => {
                   const vid = it?.id?.videoId;
-                  const pa = it?.snippet?.publishedAt as string | undefined;
+                  const pa = it?.snippet?.publishedAt;
                   if (
                     pa &&
                     (!mostRecentPublishedAt || pa > mostRecentPublishedAt)
@@ -529,12 +459,6 @@ export class YoutubeIngestService {
 
     await Promise.allSettled(tasks);
 
-    // Write exports
-    const jsonlPath = path.join(this.metaDir(), 'records.jsonl');
-    const csvPath = path.join(this.metaDir(), 'records.csv');
-    writeJsonl(jsonlPath, acc.jsonlRecords);
-    writeCsv(csvPath, csvHeaders, acc.csvRows);
-
     const took = Math.round((Date.now() - start) / 1000);
     const summary: IngestSummary = {
       channelsProcessed,
@@ -542,8 +466,6 @@ export class YoutubeIngestService {
       imagesSaved: acc.imagesSaved.value,
       rowsUpserted: acc.rowsUpserted.value,
       tookSec: took,
-      jsonlPath,
-      csvPath,
       imageDir: this.imageDir(),
     };
     this.logger.log(
