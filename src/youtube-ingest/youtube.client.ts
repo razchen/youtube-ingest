@@ -57,7 +57,6 @@ export class YoutubeClient {
     url: string,
     params: Record<string, any>,
   ): Promise<AxiosResponse<T>> {
-    this.logger.log(`GET ${url} ${JSON.stringify(params)} | key=${this.key}`);
     return withBackoff(() =>
       this.http.get<T>(url, { params: { key: this.key, ...params } }),
     );
@@ -66,7 +65,6 @@ export class YoutubeClient {
   async getChannel(
     channelId: string,
   ): Promise<YoutubeApiResponse<YoutubeChannel>> {
-    this.logger.log(`Fetching channel ${channelId}`);
     const res = await this.get<YoutubeApiResponse<YoutubeChannel>>(
       '/channels',
       {

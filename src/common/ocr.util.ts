@@ -65,7 +65,6 @@ export async function ocrBasic(
   const data = await postWithRetry<PaddleResp>(form, `${OCR_BASE_URL}/ocr`);
 
   const text = (data.text || '').replace(/\s+/g, ' ').trim();
-  console.log('text', text);
   return {
     charCount: text.replace(/\s+/g, '').length,
     areaPct: data.areaPct,

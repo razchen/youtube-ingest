@@ -129,6 +129,10 @@ export class YoutubeIngestService {
         const contentDetails = v?.contentDetails ?? {};
         const live = v?.liveStreamingDetails ?? {};
 
+        const title: string = snippet?.title ?? '';
+
+        this.logger.log(title);
+
         // choose thumbnail
         const t = snippet?.thumbnails ?? {};
         const chosen = t.maxres ?? t.high ?? t.medium ?? null;
@@ -164,8 +168,6 @@ export class YoutubeIngestService {
 
         const ocr = await ocrBasic(savePath);
 
-        const title: string = snippet?.title ?? '';
-
         const visionRaw = await analyzeImage(savePath, {
           title,
           ocrText: (ocr as any)?.rawText ?? '',
@@ -175,8 +177,6 @@ export class YoutubeIngestService {
           title,
           ocrText: (ocr as any)?.rawText ?? '',
         });
-
-        console.log('refined', refined);
 
         // --- map refined outputs ---
         const faces_json = refined.faces_json; // already string or null
