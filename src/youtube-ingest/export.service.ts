@@ -1,0 +1,260 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Thumbnail } from './thumbnail.entity';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { ensureDir } from '@/common/fs.util';
+import * as path from 'path';
+import * as fs from 'fs';
+import { Channel } from './channel.entity';
+
+interface CSVThumbnail extends Thumbnail {
+  channelTitle: string | null;
+  subscribers: number | null;
+}
+
+interface ThumbnailRecord {
+  videoId: string;
+  channelId: string;
+  channelTitle: string | null;
+  title: string | null;
+  publishedAt: string | null;
+  views: number | null;
+  likes: number | null;
+  subscribers: number | null;
+  thumbnail_savedPath: string | null;
+  thumbnail_src: string | null;
+  thumbnail_nativeW: number | null;
+  thumbnail_nativeH: number | null;
+  ocr_charCount: number | null;
+  ocr_areaPct: number | null;
+  engagementScore: number | null;
+  hash_pHash: string | null;
+  hash_sha256: string | null;
+  split: string | null;
+  fetchedAt: string | null;
+  faces_count: number | null;
+  faces_largest_areaPct: number | null;
+  contrast: number | null;
+  palette_top1: string | null;
+  tags: string | null;
+}
+
+@Injectable()
+export class ExportService {
+  constructor(
+    @InjectRepository(Thumbnail)
+    private readonly repo: Repository<Thumbnail>,
+    private readonly logger: Logger,
+  ) {}
+
+  private csvHeaders = [
+    'videoId',
+    'channelId',
+    'channelTitle',
+    'title',
+    'publishedAt',
+    'views',
+    'likes',
+    'subscribers',
+    'thumbnail_savedPath',
+    'thumbnail_src',
+    'thumbnail_nativeW',
+    'thumbnail_nativeH',
+    'ocr_charCount',
+    'ocr_areaPct',
+    'engagementScore',
+    'hash_pHash',
+    'hash_sha256',
+    'split',
+    'fetchedAt',
+    'faces_count',
+    'faces_largest_areaPct',
+    'contrast',
+    'palette_top1',
+    'tags',
+  ];
+
+  // map DB row -> CSV row
+  private toCsvRow(t: CSVThumbnail): any[] {
+    // If you stored these as JSON strings, keep as-is;
+    // if they’re JSON objects, adapt accordingly.
+    const faces_count = t.faces_json?.csv?.faces_count ?? null;
+    const faces_largest_areaPct =
+      (t as any)?.faces_json?.csv?.faces_largest_areaPct ?? null;
+    const contrast = t.contrast ?? null;
+    const palette_top1 = (t as any)?.palette_json?.csv?.palette_top1 ?? null;
+    const tags = (t as any)?.objects_json?.csv?.tags ?? null;
+
+    return [
+      t.videoId,
+      t.channelId,
+      t.channelTitle ?? null,
+      t.title ?? null,
+      t.publishedAt ?? null,
+      t.views ?? null,
+      t.likes ?? null,
+      t.subscribers ?? null,
+      t.thumbnail_savedPath ?? null,
+      t.thumbnail_src ?? null,
+      t.thumbnail_nativeW ?? null,
+      t.thumbnail_nativeH ?? null,
+      t.ocr_charCount ?? null,
+      t.ocr_areaPct ?? null,
+      t.engagementScore ?? null,
+      t.hash_pHash ?? null,
+      t.hash_sha256 ?? null,
+      t.split ?? null,
+      t.fetchedAt ?? null,
+      faces_count,
+      faces_largest_areaPct,
+      contrast,
+      palette_top1,
+      tags,
+    ];
+  }
+
+  // map DB row -> JSONL record (choose the fields you want)
+  private toJsonlRecord(t: CSVThumbnail): Record<string, any> {
+    return {
+      videoId: t.videoId,
+      channelId: t.channelId,
+      channelTitle: t.channelTitle,
+      title: t.title,
+      publishedAt: t.publishedAt,
+      views: t.views,
+      likes: t.likes,
+      subscribers: t.subscribers,
+      thumbnail: {
+        path: t.thumbnail_savedPath,
+        src: t.thumbnail_src,
+        w: t.thumbnail_nativeW,
+        h: t.thumbnail_nativeH,
+      },
+      ocr: {
+        charCount: t.ocr_charCount,
+        areaPct: t.ocr_areaPct,
+      },
+      engagementScore: t.engagementScore,
+      hashes: { pHash: t.hash_pHash, sha256: t.hash_sha256 },
+      split: t.split,
+      fetchedAt: t.fetchedAt,
+      faces_json: t.faces_json,
+      objects_json: t.objects_json,
+      palette_json: t.palette_json,
+      contrast: t.contrast,
+      entropy: t.entropy,
+      saliency_json: t.saliency_json,
+      flags_json: t.flags_json,
+      etag: t.etag,
+      notes: t.notes,
+      categoryId: t.categoryId,
+      durationSec: t.durationSec,
+      isLive: t.isLive,
+      madeForKids: t.madeForKids,
+      tags_json: t.tags_json,
+    };
+  }
+
+  /**
+   * Export thumbnails from DB (optionally filtered) into CSV + JSONL files.
+   * Reads in batches to keep memory bounded.
+   */
+  async exportThumbnailsFromDb(options?: {
+    outCsvPath: string;
+    outJsonlPath: string;
+    batchSize?: number; // default 2000
+    channelIds?: string[]; // optional filter
+    publishedAfter?: string; // optional ISO filter
+  }): Promise<{ csvPath: string; jsonlPath: string; rows: number }> {
+    const outCsvPath = options?.outCsvPath;
+    const outJsonlPath = options?.outJsonlPath;
+    const batchSize = options?.batchSize ?? 2000;
+
+    if (!outCsvPath || !outJsonlPath) {
+      throw new Error('outCsvPath and outJsonlPath are required');
+    }
+
+    // ensure dir
+    ensureDir(path.dirname(outCsvPath));
+    ensureDir(path.dirname(outJsonlPath));
+
+    // clear files
+    if (fs.existsSync(outCsvPath)) fs.unlinkSync(outCsvPath);
+    if (fs.existsSync(outJsonlPath)) fs.unlinkSync(outJsonlPath);
+
+    // write CSV header
+    // If writeCsv only writes full arrays, we can write header manually:
+    fs.appendFileSync(outCsvPath, this.csvHeaders.join(',') + '\n');
+
+    let total = 0;
+    let lastId: string | null = null;
+
+    for (;;) {
+      // Build a paged query with a stable sort (by videoId)
+      let qb = this.repo
+        .createQueryBuilder('t')
+        .leftJoin(Channel, 'c', 'c.id = t.channelId')
+        .select([
+          't.*', // if using MySQL with TypeORM < 0.3, adapt to explicit columns
+        ])
+        .addSelect('c.title', 'channelTitle')
+        .addSelect('c.subscribers', 'subscribers')
+        .orderBy('t.videoId', 'ASC')
+        .take(batchSize);
+
+      if (lastId) qb = qb.where('t.videoId > :lastId', { lastId });
+
+      if (options?.channelIds?.length) {
+        qb = qb.andWhere('t.channelId IN (:...cids)', {
+          cids: options.channelIds,
+        });
+      }
+      if (options?.publishedAfter) {
+        qb = qb.andWhere('t.publishedAt >= :pa', {
+          pa: options.publishedAfter,
+        });
+      }
+
+      const raws = await qb.getMany();
+
+      if (!raws.length) break;
+
+      // massage rows into our shapes
+      const rows: CSVThumbnail[] = raws.map((r: ThumbnailRecord) => {
+        // If using getRawMany: columns come as t_<col>, channelTitle, subscribers
+        // Adapt mapping as needed depending on your driver & TypeORM version.
+        const t: any = {};
+        t.videoId = r['videoId'] ?? null;
+        t.channelId = r['channelId'] ?? null;
+        t.channelTitle = r['channelTitle'] ?? null;
+        t.subscribers =
+          r['subscribers'] != null ? Number(r['subscribers']) : null;
+        return t as CSVThumbnail;
+      });
+
+      // append to CSV + JSONL
+      const csvLines = rows.map((t) =>
+        this.toCsvRow(t)
+          .map((v) => (v == null ? '' : String(v).replace(/"/g, '""')))
+          .map((v) =>
+            v.includes(',') || v.includes('"') || v.includes('\n')
+              ? `"${v}"`
+              : v,
+          )
+          .join(','),
+      );
+      fs.appendFileSync(outCsvPath, csvLines.join('\n') + '\n');
+
+      const jsonlLines = rows.map((t) => JSON.stringify(this.toJsonlRecord(t)));
+      fs.appendFileSync(outJsonlPath, jsonlLines.join('\n') + '\n');
+
+      total += rows.length;
+      lastId = rows[rows.length - 1].videoId;
+    }
+
+    this.logger.log(
+      `Exported ${total} rows -> ${outCsvPath} & ${outJsonlPath}`,
+    );
+    return { csvPath: outCsvPath, jsonlPath: outJsonlPath, rows: total };
+  }
+}
