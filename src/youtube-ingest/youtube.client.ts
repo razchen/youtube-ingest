@@ -1,8 +1,9 @@
 import {
+  ListUploadsSinceResult,
   YoutubeApiResponse,
   YoutubeChannel,
+  YoutubePlaylistItem,
   YoutubeSearchItem,
-  YoutubeSnippet,
   YoutubeVideo,
 } from '@/types/youtube';
 import { Injectable, Logger } from '@nestjs/common';
@@ -112,26 +113,53 @@ export class YoutubeClient {
     return res.data;
   }
 
+  async listUploadsSince(
+    uploadsPlaylistId: string,
+    opts: { publishedAfterIso: string; maxVideos?: number },
+  ): Promise<ListUploadsSinceResult> {
+    let pageToken: string | undefined;
+    const out: string[] = [];
+    let mostRecent: string | null = null;
+    let pagesFetched = 0;
+
+    do {
+      const page = await this.playlistItems(uploadsPlaylistId, pageToken);
+      pagesFetched++;
+
+      const items = page?.items ?? [];
+      if (items.length === 0) break;
+
+      for (const it of items) {
+        const vid = it?.contentDetails?.videoId;
+        const vpa = it?.contentDetails?.videoPublishedAt;
+        if (vpa && (!mostRecent || vpa > mostRecent)) mostRecent = vpa;
+        if (vid && vpa && vpa >= opts.publishedAfterIso) out.push(vid);
+      }
+
+      const lastVpa = items[items.length - 1]?.contentDetails?.videoPublishedAt;
+      const hitCutoff = !!lastVpa && lastVpa < opts.publishedAfterIso;
+      const reachedCap = !!opts.maxVideos && out.length >= opts.maxVideos;
+
+      if (reachedCap) out.length = opts.maxVideos!;
+      pageToken = !hitCutoff && !reachedCap ? page?.nextPageToken : undefined;
+    } while (pageToken);
+
+    return { videoIds: out, mostRecentPublishedAt: mostRecent, pagesFetched };
+  }
+
   async playlistItems(
     playlistId: string,
     pageToken?: string,
-  ): Promise<
-    YoutubeApiResponse<{
-      snippet: YoutubeSnippet;
-      contentDetails: { videoId: string };
-    }>
-  > {
-    const res = await this.get<
-      YoutubeApiResponse<{
-        snippet: YoutubeSnippet;
-        contentDetails: { videoId: string };
-      }>
-    >('/playlistItems', {
-      part: 'snippet,contentDetails',
-      playlistId,
-      maxResults: 50,
-      pageToken,
-    });
+  ): Promise<YoutubeApiResponse<YoutubePlaylistItem>> {
+    const res = await this.get<YoutubeApiResponse<YoutubePlaylistItem>>(
+      '/playlistItems',
+      {
+        part: 'contentDetails', // <-- drop snippet to save bandwidth
+        playlistId,
+        maxResults: 50,
+        pageToken,
+      },
+    );
     return res.data;
   }
 
@@ -147,6 +175,8 @@ export class YoutubeClient {
         id: chunk.join(','),
         maxResults: 50,
       });
+
+      // console.log(JSON.stringify(res.data?.items));
       results.push(...(res.data?.items ?? []));
     }
     return results;
@@ -171,5 +201,61 @@ export class YoutubeClient {
       },
     );
     return res.data;
+  }
+
+  async isShortByRedirect(
+    videoId: string,
+  ): Promise<'short' | 'not-short' | 'unknown'> {
+    try {
+      const res = await axios.head(
+        `https://www.youtube.com/shorts/${videoId}`,
+        {
+          maxRedirects: 0,
+          timeout: 5000,
+          // don’t follow redirects; treat 2xx/3xx as “ok”
+          validateStatus: (s) => (s >= 200 && s < 400) || s === 429,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        },
+      );
+      if (res.status === 200) return 'short';
+      if (res.status === 302 || res.status === 303) return 'not-short';
+      return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  async probeThumb(url: string): Promise<boolean> {
+    try {
+      const res = await axios.head(url, {
+        maxRedirects: 0,
+        timeout: 5000,
+        validateStatus: (s) => s >= 200 && s < 400,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      return res.status >= 200 && res.status < 300;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Prefer true maxres, then sd, then API-provided */
+  async resolveBestThumbUrl(
+    vid: string,
+    apiThumbs: any,
+  ): Promise<string | null> {
+    const candidates: Array<string | undefined> = [
+      apiThumbs?.maxres?.url,
+      `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`, // probe even if API omitted it
+      apiThumbs?.standard?.url,
+      `https://i.ytimg.com/vi/${vid}/sddefault.jpg`, // 640×480 (4:3)
+      apiThumbs?.high?.url, // 480×360
+      apiThumbs?.medium?.url, // 320×180
+    ];
+    for (const u of candidates) {
+      if (!u) continue;
+      if (await this.probeThumb(u)) return u;
+    }
+    return null;
   }
 }

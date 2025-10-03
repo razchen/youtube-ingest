@@ -106,7 +106,7 @@ function splitIdsAndHandles(items: string[] | undefined) {
       [
         'No mode selected. Examples:',
         '  npm run ingest -- --discover-json ./data/parsed/handles_us_travel.json',
-        '  npm run ingest -- --discover-only --handles @mrbeast,@veritasium',
+        '  npm run ingest -- --discover-only --handles @milashaumkabest',
         '  npm run ingest -- --from-db --statuses idle,queued --max 3',
       ].join('\n'),
     );

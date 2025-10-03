@@ -16,7 +16,7 @@ import * as fs from 'fs';
 import pLimit from 'p-limit';
 import { YoutubeClient } from './youtube.client';
 import { IngestSummary } from '@/types/ingest';
-import { YoutubeSearchItem } from '@/types/youtube';
+import { shouldKeepForTraining } from '@/common/thumbnail.util';
 
 type IngestAccumulators = {
   videosSeen: { value: number };
@@ -61,6 +61,9 @@ export class YoutubeIngestService {
       .createQueryBuilder('c')
       .orderBy('c.lastIngestAt', 'ASC')
       .addOrderBy('c.id', 'ASC');
+
+    // Debug specific id
+    // qb.andWhere('c.id IN (:...ids)', { ids: ['UC9avFXTdbSo5ATvzTRnAVFg'] });
 
     if (statuses?.length)
       qb.andWhere('c.scrapeStatus IN (:...s)', { s: statuses });
@@ -118,15 +121,51 @@ export class YoutubeIngestService {
           this.logger.log(title);
 
           // choose thumbnail
-          const t = snippet?.thumbnails ?? {};
-          const chosen = t.maxres ?? t.high ?? t.medium ?? null;
-          const src = chosen?.url;
+          const apiThumbs = snippet?.thumbnails ?? {};
+          let src =
+            apiThumbs?.maxres?.url ??
+            apiThumbs?.high?.url ??
+            apiThumbs?.medium?.url ??
+            null;
+
           if (!src) {
-            this.logger.warn(`No viable thumbnail for video ${vid}, skipping.`);
+            // try to recover a real file even if API didn’t list it
+            src = await this.yt.resolveBestThumbUrl(vid, apiThumbs);
+          }
+          if (!src) {
+            this.logger.warn(`No thumbnail for ${vid}, skipping.`);
             return;
           }
 
-          const savePath = path.join(this.imageDir(), `${vid}.jpg`);
+          // decide *before* downloading a tiny 320×… asset
+          const chosenW =
+            apiThumbs?.maxres?.width ??
+            apiThumbs?.standard?.width ??
+            apiThumbs?.high?.width ??
+            null;
+          const chosenH =
+            apiThumbs?.maxres?.height ??
+            apiThumbs?.standard?.height ??
+            apiThumbs?.high?.height ??
+            null;
+
+          const keepForTraining = shouldKeepForTraining(chosenW, chosenH);
+          if (!keepForTraining) {
+            this.logger.warn(`No thumbnail for ${vid}, skipping.`);
+            return;
+          }
+
+          const durationSec = isoDurationToSec(contentDetails?.duration);
+
+          if ((await this.yt.isShortByRedirect(vid)) === 'short') {
+            this.logger.log(`Skipping Shorts-like video ${vid})`);
+            return;
+          }
+
+          const savePath = path.join(
+            this.imageDir(),
+            `${channelId}_${vid}.jpg`,
+          );
           if (!fs.existsSync(savePath)) {
             try {
               await downloadToFile(src, savePath);
@@ -144,10 +183,8 @@ export class YoutubeIngestService {
           const sha = sha256Buffer(buf);
           const ph = await pHash(savePath);
 
-          const nativeW =
-            chosen?.width ?? (await imageMeta(savePath)).width ?? null;
-          const nativeH =
-            chosen?.height ?? (await imageMeta(savePath)).height ?? null;
+          const nativeW = chosenW ?? (await imageMeta(savePath)).width ?? null;
+          const nativeH = chosenH ?? (await imageMeta(savePath)).height ?? null;
 
           const ocr = await ocrBasic(savePath);
 
@@ -170,7 +207,6 @@ export class YoutubeIngestService {
           const views = Number(statistics?.viewCount ?? 0);
           const likes =
             statistics?.likeCount != null ? Number(statistics.likeCount) : null;
-          const durationSec = isoDurationToSec(contentDetails?.duration);
           const isLive =
             live?.actualStartTime || live?.scheduledStartTime ? 1 : null;
           const madeForKids =
@@ -293,45 +329,19 @@ export class YoutubeIngestService {
           }
 
           try {
-            let pageToken: string | undefined;
-            let collectedVideoIds: string[] = [];
-            let mostRecentPublishedAt: string | null = null;
-
-            do {
-              const res = await this.yt.searchChannelUploads(
-                cid,
-                afterIso,
-                pageToken,
+            const uploadsPlaylistId = channelRow?.uploadsPlaylistId;
+            if (!uploadsPlaylistId) {
+              this.logger.warn(
+                `Missing uploadsPlaylistId for channel ${cid}, skipping.`,
               );
-              const items: YoutubeSearchItem[] = res?.items ?? [];
-              const vids = items
-                .map((it: YoutubeSearchItem) => {
-                  const vid = it?.id?.videoId;
-                  const pa = it?.snippet?.publishedAt;
-                  if (
-                    pa &&
-                    (!mostRecentPublishedAt || pa > mostRecentPublishedAt)
-                  ) {
-                    mostRecentPublishedAt = pa;
-                  }
-                  return vid;
-                })
-                .filter(Boolean) as string[];
+              return;
+            }
 
-              collectedVideoIds.push(...vids);
-              pageToken = res?.nextPageToken;
-
-              if (
-                maxVideosPerChannel &&
-                collectedVideoIds.length >= maxVideosPerChannel
-              ) {
-                collectedVideoIds = collectedVideoIds.slice(
-                  0,
-                  maxVideosPerChannel,
-                );
-                pageToken = undefined;
-              }
-            } while (pageToken);
+            const { videoIds: collectedVideoIds, mostRecentPublishedAt } =
+              await this.yt.listUploadsSince(uploadsPlaylistId, {
+                publishedAfterIso: afterIso,
+                maxVideos: maxVideosPerChannel,
+              });
 
             // hydrate & persist
             const chunkSize = 50;
@@ -356,7 +366,7 @@ export class YoutubeIngestService {
               lastIngestAt: new Date(),
             };
             if (mostRecentPublishedAt)
-              markers.lastVideoPublishedAt = mostRecentPublishedAt;
+              markers.lastVideoPublishedAt = new Date(mostRecentPublishedAt);
 
             if (channelRow) {
               await this.channelRepo.update(

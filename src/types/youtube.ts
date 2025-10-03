@@ -62,3 +62,16 @@ export interface YoutubeApiResponse<T> {
   nextPageToken?: string;
   etag?: string;
 }
+
+export type ListUploadsSinceResult = {
+  videoIds: string[];
+  mostRecentPublishedAt: string | null;
+  pagesFetched: number;
+};
+
+export type YoutubePlaylistItem = {
+  contentDetails: {
+    videoId: string;
+    videoPublishedAt?: string; // <-- needed
+  };
+};
