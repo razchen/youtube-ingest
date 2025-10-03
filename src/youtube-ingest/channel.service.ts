@@ -6,6 +6,7 @@ import { YoutubeClient } from './youtube.client';
 import { YoutubeChannel } from '@/types/youtube';
 import * as path from 'path';
 import { promises as fs } from 'fs';
+import pLimit from 'p-limit';
 
 type DiscoverRow = {
   handle: string;
@@ -221,29 +222,30 @@ export class ChannelService {
     const mappings: { handle: string; channelId: string }[] = [];
     let upserts = 0;
 
-    for (const { handle, country, categories } of merged) {
-      const h = this.normHandle(handle);
-      if (!h) continue;
+    const limit = pLimit(8); // concurrency
 
-      this.logger.log(h);
+    await Promise.allSettled(
+      merged.map(({ handle, country, categories }) =>
+        limit(async () => {
+          const h = this.normHandle(handle);
+          if (!h) return;
 
-      try {
-        const item = await this.yt.getChannelByHandle(h);
-        if (!item?.id) {
-          notFound.push(h);
-          continue;
-        }
-
-        // IMPORTANT: pass overrides so we don't depend on YouTube for country/categories
-        await this.upsertFromApi(item, h, { country, categories });
-
-        mappings.push({ handle: h, channelId: item.id });
-        upserts++;
-      } catch (e: any) {
-        errors.push({ handle: h, error: String(e?.message ?? e) });
-        this.logger.warn(`discoverFromJson failed for ${h}: ${String(e)}`);
-      }
-    }
+          try {
+            const item = await this.yt.getChannelByHandle(h);
+            if (!item?.id) {
+              notFound.push(h);
+              return;
+            }
+            await this.upsertFromApi(item, h, { country, categories });
+            mappings.push({ handle: h, channelId: item.id });
+            upserts++;
+          } catch (e: any) {
+            errors.push({ handle: h, error: String(e?.message ?? e) });
+            this.logger.warn(`discoverFromJson failed for ${h}: ${String(e)}`);
+          }
+        }),
+      ),
+    );
 
     return {
       handlesProcessed: merged.length,
