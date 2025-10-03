@@ -1,11 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Thumbnail } from './thumbnail.entity';
+import { Thumbnail } from '../thumbnail/thumbnail.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ensureDir } from '@/common/fs.util';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Channel } from './channel.entity';
+import { Channel } from '@/channel/channel.entity';
 
 type WithChannelExtras<T> = T & {
   channelTitle: string | null;
@@ -146,7 +146,6 @@ export class ExportService {
       notes: t.notes,
       categoryId: t.categoryId,
       durationSec: t.durationSec,
-      isLive: t.isLive,
       madeForKids: t.madeForKids,
       tags_json: t.tags_json,
     };

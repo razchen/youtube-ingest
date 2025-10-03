@@ -17,7 +17,6 @@ export interface YoutubeSnippet {
     maxres?: YoutubeThumbnail;
   };
   categoryId?: string;
-  madeForKids?: boolean;
 }
 
 export interface YoutubeStatistics {
@@ -40,15 +39,17 @@ export interface YoutubeChannel {
   contentDetails?: { relatedPlaylists?: { uploads: string } };
 }
 
+export interface YoutubeStatus {
+  madeForKids: boolean;
+  selfDeclaredMadeForKids: boolean;
+}
+
 export interface YoutubeVideo {
   id: string;
   snippet?: YoutubeSnippet;
   statistics?: YoutubeStatistics;
   contentDetails?: YoutubeContentDetails;
-  liveStreamingDetails?: {
-    actualStartTime?: string;
-    scheduledStartTime?: string;
-  };
+  status?: YoutubeStatus;
   etag?: string;
 }
 

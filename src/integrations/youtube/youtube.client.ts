@@ -171,7 +171,7 @@ export class YoutubeClient {
     const results: YoutubeVideo[] = [];
     for (const chunk of chunks) {
       const res = await this.get<YoutubeApiResponse<YoutubeVideo>>('/videos', {
-        part: 'snippet,statistics,contentDetails,liveStreamingDetails',
+        part: 'snippet,statistics,contentDetails,status',
         id: chunk.join(','),
         maxResults: 50,
       });
@@ -244,18 +244,26 @@ export class YoutubeClient {
     vid: string,
     apiThumbs: any,
   ): Promise<string | null> {
-    const candidates: Array<string | undefined> = [
+    const first = [
       apiThumbs?.maxres?.url,
-      `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`, // probe even if API omitted it
       apiThumbs?.standard?.url,
-      `https://i.ytimg.com/vi/${vid}/sddefault.jpg`, // 640×480 (4:3)
-      apiThumbs?.high?.url, // 480×360
-      apiThumbs?.medium?.url, // 320×180
-    ];
-    for (const u of candidates) {
-      if (!u) continue;
-      if (await this.probeThumb(u)) return u;
+      apiThumbs?.high?.url,
+    ].filter(Boolean);
+    for (const u of first) if (await this.probeThumb(u)) return u;
+
+    const fallbacks = [
+      `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`,
+      `https://i.ytimg.com/vi/${vid}/sddefault.jpg`,
+      apiThumbs?.medium?.url,
+    ].filter(Boolean) as string[];
+
+    const race = (u: string) =>
+      this.probeThumb(u).then((ok) => (ok ? u : Promise.reject(u)));
+
+    try {
+      return await Promise.any(fallbacks.map(race));
+    } catch {
+      return null;
     }
-    return null;
   }
 }

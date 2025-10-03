@@ -1,8 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { YoutubeIngestModule } from './youtube-ingest/youtube-ingest.module';
-import { Thumbnail } from './youtube-ingest/thumbnail.entity';
+import { IngestModule } from './ingest/ingest.module';
+import { Thumbnail } from './thumbnail/thumbnail.entity';
+import { ChannelModule } from './channel/channel.module';
+import { VideosModule } from './video/video.module';
+import { ThumbnailModule } from './thumbnail/thumbnail.module';
+import { YoutubeModule } from './integrations/youtube/youtube.module';
 
 @Module({
   imports: [
@@ -25,7 +29,12 @@ import { Thumbnail } from './youtube-ingest/thumbnail.entity';
         autoLoadEntities: true,
       }),
     }),
-    YoutubeIngestModule,
+    YoutubeModule,
+
+    ChannelModule,
+    VideosModule,
+    ThumbnailModule,
+    IngestModule,
   ],
 })
 export class AppModule {}

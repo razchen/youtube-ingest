@@ -9,8 +9,14 @@ export interface IngestParams {
 export interface IngestSummary {
   channelsProcessed: number;
   videosSeen: number;
-  imagesSaved: number;
   rowsUpserted: number;
+  imagesSaved: number;
   tookSec: number;
   imageDir: string;
 }
+
+export type IngestAccumulators = {
+  videosSeen: { value: number };
+  imagesSaved: { value: number };
+  rowsUpserted: { value: number };
+};

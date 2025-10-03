@@ -6,7 +6,7 @@ import {
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
-import { Channel } from './channel.entity';
+import { Channel } from '@/channel/channel.entity';
 
 @Entity({ name: 'thumbnails' })
 export class Thumbnail {
@@ -75,9 +75,6 @@ export class Thumbnail {
   durationSec!: number | null;
 
   @Column({ type: 'tinyint', nullable: true })
-  isLive!: number | null;
-
-  @Column({ type: 'tinyint', nullable: true })
   madeForKids!: number | null;
 
   @Column({ type: 'longtext', nullable: true })
@@ -97,9 +94,6 @@ export class Thumbnail {
 
   @Column({ type: 'longtext', nullable: true })
   saliency_json!: string | null;
-
-  @Column({ type: 'text', nullable: true })
-  channelCountry!: string | null;
 
   @Column({ type: 'longtext', nullable: true })
   flags_json!: string | null;

@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Channel } from './channel.entity';
-import { YoutubeClient } from './youtube.client';
+import { YoutubeClient } from '../integrations/youtube/youtube.client';
 import { YoutubeChannel } from '@/types/youtube';
 import * as path from 'path';
 import { promises as fs } from 'fs';
@@ -68,7 +68,6 @@ export class ChannelService {
     const entity: Partial<Channel> = {
       id,
       handle: handle ?? null,
-      username: null,
       title: sn?.title ?? '',
       subscribers: Number(st?.subscriberCount ?? 0),
       viewsCount: st?.viewCount != null ? Number(st.viewCount) : null,

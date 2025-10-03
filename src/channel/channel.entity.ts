@@ -1,6 +1,5 @@
-// src/youtube-ingest/channel.entity.ts
+import { Thumbnail } from '@/thumbnail/thumbnail.entity';
 import { Column, Entity, OneToMany, PrimaryColumn, Index } from 'typeorm';
-import { Thumbnail } from './thumbnail.entity';
 
 export type ChannelScrapeStatus =
   | 'idle'
@@ -19,11 +18,6 @@ export class Channel {
   @Index()
   @Column({ type: 'varchar', length: 128, nullable: true })
   handle!: string | null;
-
-  /** Optional: legacy username */
-  @Index()
-  @Column({ type: 'varchar', length: 128, nullable: true })
-  username!: string | null;
 
   @Column({ type: 'text' })
   title!: string;
