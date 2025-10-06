@@ -10,6 +10,7 @@ type OrderBy = 'subscribers_desc' | 'recent_activity' | 'none';
 type CandidateItem = {
   thumbnailId: string; // we’ll use videoId for this to keep shape stable
   videoId: string;
+  title: string;
   imageUrl: string;
   width: number;
   height: number;
@@ -47,7 +48,8 @@ export class ChannelRankService {
     // 1) Pull channels (unranked)
     const qb = this.channelRepo
       .createQueryBuilder('c')
-      .where('c.rank_score IS NULL');
+      .where('c.rank_score IS NULL')
+      .andWhere('c.scrapeStatus = :scrapeStatus', { scrapeStatus: 'done' });
 
     if (order === 'subscribers_desc') {
       // NULLS LAST emulation for MySQL
@@ -75,6 +77,7 @@ export class ChannelRankService {
     const videos = await this.videoRepo.find({
       where: { channelId: In(channelIds) },
       select: [
+        'title',
         'videoId',
         'channelId',
         'engagement',
@@ -117,6 +120,7 @@ export class ChannelRankService {
         if (!v.thumb_high_url) continue; // need an actual image URL
         picked.push({
           thumbnailId: v.videoId, // no separate thumbnail entity -> reuse videoId
+          title: v.title,
           videoId: v.videoId,
           imageUrl: v.thumb_high_url,
           width: v.thumb_high_w ?? 0,

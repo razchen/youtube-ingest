@@ -2,6 +2,7 @@
 export type CandidateThumbDto = {
   thumbnailId: string;
   videoId: string;
+  title: string;
   imageUrl: string;
   width: number;
   height: number;
