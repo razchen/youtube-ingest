@@ -137,6 +137,7 @@ export class VideosService {
 
     const qb = this.channelRepo
       .createQueryBuilder('c')
+      .limit(250)
       .orderBy('c.lastIngestAt', 'ASC')
       .addOrderBy('c.id', 'ASC');
 

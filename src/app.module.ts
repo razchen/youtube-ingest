@@ -7,6 +7,7 @@ import { ChannelModule } from './channel/channel.module';
 import { VideosModule } from './video/video.module';
 import { ThumbnailModule } from './thumbnail/thumbnail.module';
 import { YoutubeModule } from './integrations/youtube/youtube.module';
+import { ChannelRankModule } from './channel-rank/channel-rank.module';
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { YoutubeModule } from './integrations/youtube/youtube.module';
     VideosModule,
     ThumbnailModule,
     IngestModule,
+    ChannelRankModule,
   ],
 })
 export class AppModule {}

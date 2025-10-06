@@ -64,6 +64,10 @@ export class Channel {
   @Column({ type: 'longtext', nullable: true })
   scrapeError!: string | null;
 
+  @Index()
+  @Column({ type: 'tinyint', unsigned: true, nullable: true })
+  rank_score!: number | null;
+
   /** Relationship (optional now; doesn't break existing code) */
   @OneToMany(() => Thumbnail, (t) => t.channel)
   thumbnails!: Thumbnail[];
