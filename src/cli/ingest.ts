@@ -5,6 +5,7 @@ import { IngestService } from '@/ingest/ingest.service'; // (if you still use it
 import { ChannelService } from '@/channel/channel.service';
 import { VideosService } from '@/video/video.service'; // NEW
 import minimist, { ParsedArgs } from 'minimist';
+import { categorizeThumbnail } from '@/common/categorize.util';
 
 function splitHandles(items?: string[]) {
   if (!items?.length) return { handles: undefined as string[] | undefined };
@@ -37,6 +38,8 @@ function splitHandles(items?: string[]) {
   const sinceDays = argv['since'] ? Number(argv['since']) : 365; // for enrich
   const pageSize = argv['page-size'] ? Number(argv['page-size']) : 1000;
   const concurrency = argv['concurrency'] ? Number(argv['concurrency']) : 3;
+
+  const categorize = Boolean(argv['categorize']);
 
   const toList = (s: string) =>
     s
@@ -115,6 +118,11 @@ function splitHandles(items?: string[]) {
       return;
     }
 
+    if (categorize) {
+      await ingestService.categorize();
+      return;
+    }
+
     // 5) Help
     console.error(
       [
@@ -127,6 +135,8 @@ function splitHandles(items?: string[]) {
         '  npm run ingest -- --catalog-from-db --statuses idle,queued --after 2020-01-01 --max 1000',
         '  # Enrich pass (eligible only)',
         '  npm run ingest -- --enrich-eligible --since 365 --page-size 1000 --concurrency 3',
+        '  # Categorize pass (thumbnails)',
+        '  npm run ingest -- --categorize',
       ].join('\n'),
     );
     process.exit(2);

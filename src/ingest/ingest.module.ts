@@ -8,6 +8,7 @@ import { YoutubeClient } from '@/integrations/youtube/youtube.client';
 import { ChannelService } from '@/channel/channel.service';
 import { Channel } from '@/channel/channel.entity';
 import { Video } from '@/video/video.entity';
+import { S3Service } from '@/infra/s3/s3.service';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { Video } from '@/video/video.entity';
     HttpModule,
     TypeOrmModule.forFeature([Thumbnail, Channel, Video]),
   ],
-  providers: [ChannelService, IngestService, YoutubeClient],
+  providers: [ChannelService, IngestService, YoutubeClient, S3Service],
   exports: [IngestService],
 })
 export class IngestModule {}

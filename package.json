@@ -21,6 +21,7 @@
     "ingest": "ts-node -r tsconfig-paths/register src/cli/ingest.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.908.0",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",

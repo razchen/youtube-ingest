@@ -6,16 +6,7 @@ from ultralytics import YOLO
 
 app = Flask(__name__)
 
-# --- Object detector (COCO) ---
-OBJ_WEIGHTS = os.environ.get("OBJ_WEIGHTS", "yolov8n.pt")
-try:
-    yolo_obj = YOLO(OBJ_WEIGHTS)
-    app.logger.info(f"[vision] Object model: {OBJ_WEIGHTS}")
-except Exception as e:
-    app.logger.error(f"[vision] Failed to load {OBJ_WEIGHTS}: {e}. Falling back to yolov8n.pt")
-    yolo_obj = YOLO("yolov8n.pt")
-
-# --- Face detector ---
+# --- Face detector only ---
 FACE_WEIGHTS = os.environ.get("FACE_WEIGHTS", "/models/yolov8n-face.pt")
 yolo_face = None
 try:
@@ -48,13 +39,6 @@ def palette(img: Image.Image, k: int = 5):
         out.append({"hex": "#{:02x}{:02x}{:02x}".format(r, g, b), "pct": cnt / s})
     return out
 
-def coco_to_coarse(names):
-    tags = set()
-    veh = {'car','truck','bus','motorcycle','train'}
-    if any(n in veh for n in names): tags.add('car')
-    if 'person' in names: tags.add('person')
-    return list(tags)
-
 @app.post("/analyze")
 def analyze():
     if 'image' not in request.files:
@@ -68,20 +52,6 @@ def analyze():
     pal = palette(img, k=5)
     contrast = rms_contrast(img.convert('L'))
 
-    # objects (YOLO12 detect)
-    res = yolo_face.predict(img, imgsz=1280, conf=0.15, iou=0.5, verbose=False)
-
-    names, raw = [], []
-    for r in res:
-        for b in r.boxes:
-            cls = int(b.cls[0])
-            name = r.names[cls]
-            names.append(name)
-            x1, y1, x2, y2 = map(float, b.xyxy[0])
-            raw.append({"name": name, "conf": float(b.conf[0]),
-                        "box": {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}})
-    coarse = coco_to_coarse(names)
-    
     # faces (optional YOLO-Face)
     faces_payload = {"enabled": yolo_face is not None, "count": 0}
     if yolo_face is not None:
@@ -99,7 +69,6 @@ def analyze():
 
     return jsonify({
         "faces": faces_payload,
-        "objects": {"tags": coarse, "raw": raw},
         "palette": pal,
         "contrast": contrast,
         "imageSize": {"width": w, "height": h}

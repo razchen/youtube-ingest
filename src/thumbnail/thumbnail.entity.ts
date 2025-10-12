@@ -21,7 +21,7 @@ export class Thumbnail {
   title!: string;
 
   @Column({ type: 'text' })
-  publishedAt!: string; // ISO
+  publishedAt!: string;
 
   @Column({ type: 'bigint' })
   views!: number;
@@ -64,7 +64,18 @@ export class Thumbnail {
   @Column({ type: 'text' })
   fetchedAt!: string;
 
-  // ---- Future nullable fields ----
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  styleBucket!: string | null;
+
+  @Column({ type: 'longtext', nullable: true })
+  caption!: string | null;
+
+  @Column({ type: 'datetime', nullable: true })
+  captionedAt!: Date | null; // when caption stored
+
+  @Column({ type: 'longtext', nullable: true })
+  caption_meta_json!: string | null;
+
   @Column({ type: 'text', nullable: true })
   categoryId!: string | null;
 
@@ -95,11 +106,28 @@ export class Thumbnail {
   @Column({ type: 'longtext', nullable: true })
   saliency_json!: string | null;
 
+  @Column({
+    type: 'double',
+    nullable: true,
+    comment: '0..1 HSV V (brightness)',
+  })
+  meanLuma!: number | null;
+
+  @Column({
+    type: 'double',
+    nullable: true,
+    comment: '0..1 HSV S (saturation)',
+  })
+  meanSat!: number | null;
+
   @Column({ type: 'longtext', nullable: true })
   flags_json!: string | null;
 
   @Column({ type: 'text', nullable: true })
   etag!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  thumbnail_s3_url!: string | null;
 
   @Column({ type: 'longtext', nullable: true })
   notes!: string | null;

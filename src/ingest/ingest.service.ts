@@ -16,6 +16,13 @@ import { YoutubeClient } from '../integrations/youtube/youtube.client';
 import { IngestAccumulators, IngestSummary } from '@/types/ingest';
 import { Video } from '../video/video.entity';
 import { YoutubeVideo } from '@/types/youtube';
+import {
+  computeEntropyBits,
+  computeLumaAndSat,
+  computeSaliencyFeatures,
+} from '@/common/image-metrics.util';
+import { categorizeThumbnail } from '@/common/categorize.util';
+import { S3Service } from '@/infra/s3/s3.service';
 
 type YoutubeSnippet = NonNullable<YoutubeVideo['snippet']>;
 
@@ -31,6 +38,7 @@ export class IngestService {
     private readonly videoRepo: Repository<Video>,
     @InjectRepository(Thumbnail)
     private readonly thumbnailRepo: Repository<Thumbnail>,
+    private readonly s3: S3Service,
   ) {
     this.dataDir = this.cfg.get('DATA_DIR', './data');
     ensureDir(this.imageDir());
@@ -71,10 +79,12 @@ export class IngestService {
         d: sinceDays,
       })
       .andWhere('v.engagement > 0.7')
+      .andWhere('v.channelId = :channelId', {
+        channelId: 'UCX6OQ3DkcsbYNE6H8uQQuVA',
+      })
       // stable keyset order: oldest first to avoid rework if interrupted
       .orderBy('v.publishedAt', 'ASC')
       .addOrderBy('v.videoId', 'ASC');
-
     if (cursorPublishedAt) {
       qb = qb.andWhere(
         '(v.publishedAt > :cp) OR (v.publishedAt = :cp AND v.videoId > :cv)',
@@ -82,14 +92,23 @@ export class IngestService {
       );
     }
 
-    return qb
-      .select([
-        'v.videoId AS videoId',
-        'v.channelId AS channelId',
-        'v.publishedAt AS publishedAt',
-      ])
-      .take(pageSize)
-      .getRawMany<{ videoId: string; channelId: string; publishedAt: Date }>();
+    qb.select([
+      'v.videoId AS videoId',
+      'v.channelId AS channelId',
+      'v.publishedAt AS publishedAt',
+    ]).limit(pageSize);
+
+    this.logger.log('Query: ', qb.getQuery());
+
+    const page = await qb.getRawMany<{
+      videoId: string;
+      channelId: string;
+      publishedAt: Date;
+    }>();
+
+    this.logger.log('Found videos: ', page.length);
+
+    return page;
   }
 
   /** Enrich a single Video row (moved from your loop body). */
@@ -98,6 +117,7 @@ export class IngestService {
     const snippet = this.safeParseJson<YoutubeSnippet>(row.api_snippet_json);
 
     const title = row.title ?? snippet?.title ?? '';
+    this.logger.log(title);
     const apiThumbs = snippet?.thumbnails ?? {};
     const src =
       apiThumbs?.maxres?.url ??
@@ -139,15 +159,56 @@ export class IngestService {
     }
 
     // OCR + vision
-    const ocr = await ocrBasic(savePath);
-    const visionRaw = await analyzeImage(savePath, {
-      title,
-      ocrText: (ocr as any)?.rawText ?? '',
-    });
-    const refined = refineVision(visionRaw, {
-      title,
-      ocrText: (ocr as any)?.rawText ?? '',
-    });
+    let refined: any;
+    let visionRaw: any;
+    let ocr: any;
+    this.logger.log('starting OCR');
+    try {
+      ocr = await ocrBasic(savePath);
+      visionRaw = await analyzeImage(savePath, {
+        title,
+        ocrText: (ocr as any)?.rawText ?? '',
+      });
+      this.logger.log('finished OCR');
+    } catch (e) {
+      this.logger.warn(`OCR failed for ${row.videoId}: ${String(e)}`);
+      return;
+    }
+
+    try {
+      refined = refineVision(visionRaw, {
+        title,
+        ocrText: (ocr as any)?.rawText ?? '',
+      });
+    } catch (e) {
+      this.logger.warn(`Refine failed for ${row.videoId}: ${String(e)}`);
+      return;
+    }
+
+    let entropyBits: number | null = null;
+    let saliency: {
+      centerDist: number;
+      areaRatio: number;
+      blobCount: number;
+    } | null = null;
+
+    try {
+      // Run in parallel
+      [entropyBits, saliency] = await Promise.all([
+        computeEntropyBits(savePath),
+        computeSaliencyFeatures(savePath, {
+          width: 256,
+          percentile: 0.85,
+          stride: 2,
+        }),
+      ]);
+    } catch (e) {
+      this.logger.warn(
+        `entropy/saliency failed for ${row.videoId}: ${String(e)}`,
+      );
+    }
+
+    const { meanLuma, meanSat } = await computeLumaAndSat(savePath);
 
     const tRow: Partial<Thumbnail> = {
       videoId: row.videoId,
@@ -180,8 +241,10 @@ export class IngestService {
       objects_json: refined.objects_json,
       palette_json: refined.palette_json,
       contrast: refined.contrast ?? null,
-      entropy: null,
-      saliency_json: null,
+      entropy: entropyBits ?? null,
+      saliency_json: saliency ? JSON.stringify(saliency) : null,
+      meanLuma,
+      meanSat,
       flags_json: null,
       etag: row.etag ?? null,
       notes: null,
@@ -189,6 +252,24 @@ export class IngestService {
 
     await this.thumbnailRepo.upsert(tRow, ['videoId']);
     acc.rowsUpserted.value++;
+
+    /** Upload the original image to S3 *after* we’ve finished all CPU work. */
+    try {
+      const key = `thumbnails/${row.channelId}/${row.videoId}.jpg`;
+      const { url } = await this.s3.uploadFile(savePath, key, 'image/jpeg');
+
+      await this.thumbnailRepo.update(
+        { videoId: row.videoId },
+        { thumbnail_s3_url: url },
+      );
+
+      // Remove the local file now that we’re done with it.
+      await fs.promises.unlink(savePath).catch(() => {});
+      this.logger.log(`Uploaded to S3 and deleted local file: ${url}`);
+    } catch (e) {
+      // Keep going—if upload fails, we still have all other data persisted.
+      this.logger.warn(`S3 upload failed for ${row.videoId}: ${String(e)}`);
+    }
   }
 
   /** Super simple: page → fetch full rows → enrich (limited concurrency) → next page. */
@@ -241,6 +322,7 @@ export class IngestService {
       const last = page[page.length - 1];
       cursorPublishedAt = last.publishedAt;
       cursorVideoId = last.videoId;
+      break;
     }
 
     const tookSec = Math.round((Date.now() - started) / 1000);
@@ -252,5 +334,17 @@ export class IngestService {
       tookSec,
       imageDir: this.imageDir(),
     };
+  }
+
+  async categorize() {
+    const thumbnails = await this.thumbnailRepo.find();
+
+    for (const t of thumbnails) {
+      console.log(t.title);
+      console.log(t.thumbnail_src);
+      const out = categorizeThumbnail(t);
+
+      console.log(out);
+    }
   }
 }
